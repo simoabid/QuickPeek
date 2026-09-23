@@ -3,15 +3,15 @@
 This document is the authoritative tracking ledger for the QuickPeek implementation.
 
 ## Performance & Resource Budgets
-| Metric | Budget Target | Phase 1 Actual | Phase 2 Actual | Phase 3 Actual | Status |
-| :--- | :--- | :--- | :--- | :--- | :--- |
-| Cold Startup / Launch | $\le 300\text{ ms}$ | **123 ms** (`MAP_MS 123`) | **255 ms** (`MAP_MS 255`) | **58 ms** (canonical real-bus `MAP_MS 58`) | **PASS** |
-| Warm Preview / Toggle | $\le 80\text{ ms}$ | TBD (Phase 4) | **49 ms** (worst swap) | **71 ms** (worst toggle of 5: 35, 40, 42, 41, 71 ms) | **PASS** |
-| Close / Dismissal | $\le 50\text{ ms}$ | TBD (Phase 4) | TBD (Phase 8) | TBD (Phase 8) | PENDING |
-| Memory Footprint (RSS) | $\le 150\text{ MB}$ | ~35 MB (minimal GTK4 instance) | **54.8 MB** (54,804 KB idle) | ~55.7 MB (55,696 KB idle) | **PASS** |
-| Binary Size | $\le 15\text{ MB}$ | **507 KB** (`target/release/quickpeek`) | **555 KB** (568,256 B) | **559 KB** (571,512 B) | **PASS** |
-| Cold Build Time | $\le 300\text{ s}$ | **117.3 s** (`1m 57s` release build) | **117.3 s** (incremental: 0.07s) | **117.3 s** (incremental: 1.13s) | **PASS** |
-| Automated Test Pass Rate | 100% | **100%** (8 passed / 0 failed) | **100%** (13 unit + 8 e2e checks) | **100%** (16 unit + 12 e2e checks passed) | **PASS** |
+| Metric | Budget Target | Phase 1 Actual | Phase 2 Actual | Phase 3 Actual | Phase 3.1 Actual | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Cold Startup / Launch | $\le 300\text{ ms}$ | **123 ms** (`MAP_MS 123`) | **255 ms** (`MAP_MS 255`) | **58 ms** (canonical real-bus `MAP_MS 58`) | **58 ms** (canonical real-bus `MAP_MS 58`) | **PASS** |
+| Warm Preview / Toggle | $\le 80\text{ ms}$ | TBD (Phase 4) | **49 ms** (worst swap) | **71 ms** (worst toggle of 5: 35, 40, 42, 41, 71 ms) | **72 ms** (worst toggle of 5: 41, 40, 72, 37, 31 ms) | **PASS** |
+| Close / Dismissal | $\le 50\text{ ms}$ | TBD (Phase 4) | TBD (Phase 8) | TBD (Phase 8) | TBD (Phase 8) | PENDING |
+| Memory Footprint (RSS) | $\le 150\text{ MB}$ | ~35 MB (minimal GTK4 instance) | **54.8 MB** (54,804 KB idle) | ~55.7 MB (55,696 KB idle) | ~55.7 MB (55,696 KB idle) | **PASS** |
+| Binary Size | $\le 15\text{ MB}$ | **507 KB** (`target/release/quickpeek`) | **555 KB** (568,256 B) | **559 KB** (571,512 B) | **579 KB** (592,488 B) | **PASS** |
+| Cold Build Time | $\le 300\text{ s}$ | **117.3 s** (`1m 57s` release build) | **117.3 s** (incremental: 0.07s) | **117.3 s** (incremental: 1.13s) | **117.3 s** (incremental: 0.96s) | **PASS** |
+| Automated Test Pass Rate | 100% | **100%** (8 passed / 0 failed) | **100%** (13 unit + 8 e2e checks) | **100%** (16 unit + 12 e2e checks passed) | **100%** (22 unit + 15 e2e checks passed) | **PASS** |
 
 ---
 
@@ -22,6 +22,7 @@ This document is the authoritative tracking ledger for the QuickPeek implementat
 | **1** | **Skeleton — Single Image Preview Window** | **COMPLETE** |
 | **2** | **D-Bus Single-Instance Daemon (`org.quickpeek.QuickPeek`)** | **complete-pending-human-verification** |
 | **3** | **Super+Space Toggle Keybinding (Niri + Hyprland)** | **complete-pending-human-verification** |
+| **3.1** | **HOTFIX-1: Keybind End-to-End, PATH Install, Autostart & State Persistence** | **complete-pending-human-verification** |
 | 4 | AT-SPI Selection Extraction (Dolphin) | PLANNED |
 | 5 | AT-SPI Selection Extraction (Nautilus) | PLANNED |
 | 6 | Compositor Integration & Keybindings (Hyprland & Niri) | PLANNED |
@@ -56,6 +57,47 @@ Verified against pinned dependencies (`gtk4 0.11.5`, `gio 0.22.10`, `glib 0.22.1
    - `/usr/bin/dbus-run-session` (present)
    - `/usr/bin/gdbus` (present)
    - `/usr/bin/busctl` (present)
+
+---
+
+## Phase 3.1 HOTFIX-1 Checklist
+*(Items marked VERIFIED-BY-INSPECTION until confirmed by human)*
+
+- [x] **VERIFIED-BY-INSPECTION** — Root causes diagnosed and verified:
+  > RC1 (PRIMARY): Binary not installed to session PATH (`command -v quickpeek` exit 1; niri bare name spawn failed silently).
+  > RC2: Session daemon not running / terminated on probe.
+  > RC3: Selection in-memory only (lost on exit/reboot).
+- [x] **VERIFIED-BY-INSPECTION** — Session PATH install:
+  > `install -Dm755 target/release/quickpeek ~/.local/bin/quickpeek`.
+  > `command -v quickpeek` -> `/home/seemoo/.local/bin/quickpeek` (exit 0).
+- [x] **VERIFIED-BY-INSPECTION** — Autostart wiring & idempotent `--service`:
+  > Added `spawn-at-startup "quickpeek" "--service"` to `~/.config/niri/config.kdl`.
+  > `niri validate` confirmed valid.
+  > `quickpeek --service` when bus free starts daemon silently (`ROLE DAEMON`, `SELECTION_RESTORED` / `SELECTION_NONE`) with zero windows opened.
+  > `quickpeek --service` when daemon running exits 0 silently.
+- [x] **VERIFIED-BY-INSPECTION** — State persistence to disk:
+  > Atomic write (temp file + rename, mode 0700) to `$XDG_STATE_HOME/quickpeek/last_selection` (`~/.local/state/quickpeek/last_selection`).
+  > Written on every successful preview (`ShowFile`, toggle-open).
+  > Restored on daemon startup (`SELECTION_RESTORED <path>` / `SELECTION_NONE`).
+- [x] **VERIFIED-BY-INSPECTION** — Cold-toggle semantics & stale-selection fallback:
+  > Cold bare `quickpeek` start opens persisted selection immediately (`WINDOW_OPENED` + `WARM_MS`).
+  > Stale/nonexistent persisted path logs `Error: last previewed file no longer exists: <path>`, clears selection, leaves daemon running with no window.
+- [x] **VERIFIED-BY-INSPECTION** — Server-side toggle debounce:
+  > Ignores `Toggle()` calls received $\le 120\text{ ms}$ after open to prevent accidental double-press closure.
+- [x] **VERIFIED-BY-INSPECTION** — Automated unit and E2E test suites passing:
+  > `cargo test`: 22 passed / 0 failed (100%).
+  > `dbus-run-session ./tests/e2e_dbus.sh`: 15/15 checks passed (exit 0), using isolated `$XDG_STATE_HOME` sandbox.
+- [x] **VERIFIED-BY-INSPECTION** — Performance gates within budget:
+  > Toggle timing worst of 5: **72 ms** ($\le 80\text{ ms}$).
+  > Binary size: **579 KB** / 592,488 B ($\le 15\text{ MB}$).
+  > Incremental build time: **0.96 s**.
+  > Dependency delta: 0 (`git diff Cargo.lock` empty).
+- [ ] **HUMAN-VERIFICATION-PENDING** — Desktop interactive verification:
+  > (a) `pkill -x quickpeek`, then press `Mod+Space` -> last image opens from cold.
+  > (b) `Mod+Space` toggles open/closed from any focused window.
+  > (c) After reboot, `Mod+Space` still re-opens the last previewed file.
+  > (d) `Mod+D` still opens the DMS spotlight; desktop otherwise normal.
+  > (e) Phase 2 carry-forward: image swap on repeated `quickpeek <path>`, `Escape` closes window while daemon persists, `Ctrl+C` exits daemon.
 
 ---
 

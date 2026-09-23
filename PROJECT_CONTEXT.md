@@ -166,16 +166,29 @@ QuickPeek is a lightweight, responsive Linux space-to-preview file viewer that r
     - Window open: destroys window, logs `TOGGLE_CLOSED` + `TOGGLE_MS <ms>`, returns `(true, "")`.
     - Window closed + `current_selection` exists: displays preview window, logs `TOGGLE_OPENED` + `WINDOW_OPENED` + `WARM_MS <ms>` + `TOGGLE_MS <ms>`, returns `(true, "")`.
     - Window closed + `current_selection` is `None`: returns `(false, "no file to preview")`.
-  - **CLI Contract**:
-    - `quickpeek` (no args) with daemon running: acts as silent toggle client (completely empty stdout on success; stderr `Error: <msg>` on failure).
-    - `quickpeek` (no args) with bus name free: starts daemon in **service mode** (`ROLE DAEMON`), running main loop without opening window or setting selection (autostart; first-press wart resolved by Phase 7 systemd unit).
-    - `quickpeek <path>` with bus name free: cold start with path. If path invalid, prints `Error: <msg>` to stderr, displays no window, and persists running as daemon.
+  - **CLI Contract (Amended in Phase 3.1)**:
+
+    | Invocation | Daemon State | Behavior |
+    | :--- | :--- | :--- |
+    | `quickpeek <path>` | any | ShowFile; persists selection |
+    | `quickpeek` (no args) | running | Toggle() (unchanged) |
+    | `quickpeek` (no args) | NOT running | start daemon + OPEN persisted selection; if none, silent start (service mode, no window) |
+    | `quickpeek --service` | NOT running | start daemon only; NEVER opens a window (autostart) |
+    | `quickpeek --service` | running | exit 0 silently (idempotent — autostart never errs) |
+
+  - **State Persistence ($XDG_STATE_HOME/quickpeek/last_selection)**:
+    - Path persisted atomically (temp file + rename, mode 0700) on every successful selection set (`ShowFile`, toggle-open).
+    - Restored on daemon startup (`SELECTION_RESTORED <path>` / `SELECTION_NONE`).
+    - Stale file check on open: if file no longer exists, logs `Error: last previewed file no longer exists: <path>`, clears selection, and stays alive without opening window.
+
   - **Canonical Instrumentation Grammar**:
     ```
     "ROLE DAEMON" | "ROLE CLIENT" | "WINDOW_OPENED" | "IMAGE_SWAPPED" | "WINDOW_CLOSED" |
-    "DAEMON_QUIT" | "TOGGLE_OPENED" | "TOGGLE_CLOSED" | "MAP_MS <n>" | "CALL_MS <n>" |
-    "WARM_MS <n>" | "TOGGLE_MS <n>"
+    "DAEMON_QUIT" | "TOGGLE_OPENED" | "TOGGLE_CLOSED" | "SELECTION_RESTORED <path>" |
+    "SELECTION_NONE" | "MAP_MS <n>" | "CALL_MS <n>" | "WARM_MS <n>" | "TOGGLE_MS <n>"
     ```
+    - `SELECTION_RESTORED <path>`: emitted once at daemon start when persisted selection exists.
+    - `SELECTION_NONE`: emitted once at daemon start when no persisted selection exists.
     - `WARM_MS <n>`: image display completion (emitted on swap, toggle-open, or initial open).
     - `MAP_MS <n>`: additionally emitted on each window map event (canonical real-bus baseline: **58 ms**).
     - `TOGGLE_MS <n>`: measured from D-Bus handler entry to toggle action completion (both directions).
