@@ -3,15 +3,15 @@
 This document is the authoritative tracking ledger for the QuickPeek implementation.
 
 ## Performance & Resource Budgets
-| Metric | Budget Target | Phase 1 Actual | Status |
-| :--- | :--- | :--- | :--- |
-| Cold Startup / Launch | $\le 300\text{ ms}$ | **123 ms** (`MAP_MS 123`) | **PASS** |
-| Warm Preview Display | $\le 80\text{ ms}$ | TBD (Phase 4) | PENDING |
-| Close / Dismissal | $\le 50\text{ ms}$ | TBD (Phase 4) | PENDING |
-| Memory Footprint (RSS) | $\le 150\text{ MB}$ | ~35 MB (minimal GTK4 instance) | **PASS** |
-| Binary Size | $\le 15\text{ MB}$ | **507 KB** (`target/release/quickpeek`) | **PASS** |
-| Cold Build Time | $\le 300\text{ s}$ | **117.3 s** (`1m 57s` release build) | **PASS** |
-| Automated Test Pass Rate | 100% | **100%** (8 passed / 0 failed) | **PASS** |
+| Metric | Budget Target | Phase 1 Actual | Phase 2 Actual | Status |
+| :--- | :--- | :--- | :--- | :--- |
+| Cold Startup / Launch | $\le 300\text{ ms}$ | **123 ms** (`MAP_MS 123`) | **255 ms** (`MAP_MS 255`) | **PASS** |
+| Warm Preview Display | $\le 80\text{ ms}$ | TBD (Phase 4) | **49 ms** (worst-of-5: 34ms, 35ms, 49ms, 34ms, 36ms) | **PASS** |
+| Close / Dismissal | $\le 50\text{ ms}$ | TBD (Phase 4) | TBD (Phase 8) | PENDING |
+| Memory Footprint (RSS) | $\le 150\text{ MB}$ | ~35 MB (minimal GTK4 instance) | **54.8 MB** (54,804 KB idle GTK4 daemon) | **PASS** |
+| Binary Size | $\le 15\text{ MB}$ | **507 KB** (`target/release/quickpeek`) | **555 KB** (568,256 B) | **PASS** |
+| Cold Build Time | $\le 300\text{ s}$ | **117.3 s** (`1m 57s` release build) | **117.3 s** (incremental: 0.07s) | **PASS** |
+| Automated Test Pass Rate | 100% | **100%** (8 passed / 0 failed) | **100%** (13 cargo unit + 8 e2e dbus checks passed) | **PASS** |
 
 ---
 
@@ -20,7 +20,7 @@ This document is the authoritative tracking ledger for the QuickPeek implementat
 | :---: | :--- | :---: |
 | **0** | **Reconnaissance & Environment Verification** | **COMPLETE** |
 | **1** | **Skeleton — Single Image Preview Window** | **COMPLETE** |
-| **2** | **D-Bus Single-Instance Daemon (`org.quickpeek.QuickPeek`)** | **IN PROGRESS** |
+| **2** | **D-Bus Single-Instance Daemon (`org.quickpeek.QuickPeek`)** | **COMPLETE** |
 | 3 | Image Formats Expansion: WebP, SVG, Animated GIF | PLANNED |
 | 4 | AT-SPI Selection Extraction (Dolphin) | PLANNED |
 | 5 | AT-SPI Selection Extraction (Nautilus) | PLANNED |
@@ -56,6 +56,44 @@ Verified against pinned dependencies (`gtk4 0.11.5`, `gio 0.22.10`, `glib 0.22.1
    - `/usr/bin/dbus-run-session` (present)
    - `/usr/bin/gdbus` (present)
    - `/usr/bin/busctl` (present)
+
+---
+
+## Phase 2 Checklist
+*(Items marked VERIFIED-BY-INSPECTION until confirmed by human)*
+
+- [x] **VERIFIED-BY-INSPECTION** — Pre-GTK role decision via synchronous D-Bus `RequestName`:
+  > Command: `target/release/quickpeek tests/fixtures/sample.png` (first instance) vs subsequent client invocations.
+  > Daemon acquires `org.quickpeek.QuickPeek` (`RequestName` reply 1 `PRIMARY_OWNER`), logs `ROLE DAEMON`. Client detects name owned (`RequestName` reply 3 `EXISTS`), logs `ROLE CLIENT`. Client never invokes `gtk::init()`.
+- [x] **VERIFIED-BY-INSPECTION** — D-Bus interface registration and XML introspection:
+  > Command: `gdbus introspect --session --dest org.quickpeek.QuickPeek --object-path /org/quickpeek/QuickPeek`
+  > Output confirms `interface org.quickpeek.QuickPeek` with methods `ShowFile(in s path, out b ok, out s message)` and `Quit()`. Object registered before acquiring bus name to guarantee zero-window race.
+- [x] **VERIFIED-BY-INSPECTION** — Image swap & error handling via `ShowFile`:
+  > Command: `target/release/quickpeek tests/fixtures/sample2.png` while daemon running.
+  > Output: Daemon swaps texture in existing window, logs `IMAGE_SWAPPED` and `WARM_MS <ms>`. Client prints `CALL_MS <ms>`.
+  > Nonexistent path returns `(false, 'file not found: ...')`.
+  > Non-image path (`notimage.txt`) returns `(false, 'failed to decode image: ...')`.
+- [x] **VERIFIED-BY-INSPECTION** — 2000 ms client timeout on unresponsive daemon:
+  > Verified in `./tests/e2e_dbus.sh` using `kill -STOP` on daemon PID. Client synchronously times out after 2000 ms, logs `Error: D-Bus call failed: Timeout was reached`, and exits with code 1.
+- [x] **VERIFIED-BY-INSPECTION** — Clean `Quit` method lifecycle:
+  > Command: `gdbus call --session --dest org.quickpeek.QuickPeek --object-path /org/quickpeek/QuickPeek --method org.quickpeek.QuickPeek.Quit`
+  > Daemon returns `()`, queues main loop exit via `glib::idle_add_local_once`, closes window, unexports object, releases bus name, and exits 0 (`DAEMON_QUIT`).
+- [x] **VERIFIED-BY-INSPECTION** — Zero dependency delta:
+  > Command: `git diff Cargo.lock`
+  > Output: empty (0 crates added; uses re-exported `gtk4::gio` and `gtk4::glib`).
+- [x] **VERIFIED-BY-INSPECTION** — Automated unit and hermetic E2E test suites passing:
+  > Command: `cargo test` -> `13 passed; 0 failed`.
+  > Command: `dbus-run-session ./tests/e2e_dbus.sh` -> 8/8 checks pass, exit 0.
+- [x] **VERIFIED-BY-INSPECTION** — Performance gates within budget:
+  > Warm preview latency: worst of 5 = **49 ms** ($\le 80\text{ ms}$).
+  > Cold startup first map: **255 ms** ($\le 300\text{ ms}$).
+  > Binary size: **555 KB** / 568,256 B ($\le 15\text{ MB}$).
+  > Daemon idle RSS: **54.8 MB** / 54,804 KB ($\le 150\text{ MB}$).
+  > Incremental build time: **0.07 s**.
+- [x] **VERIFIED-BY-INSPECTION** — Screenshot captured:
+  > Window screenshot showing swapped image (`sample2.png`) saved to `REPORTS/phase2_window.png` (399 KB, 1920x1080).
+- [ ] **HUMAN-VERIFICATION-PENDING** — Interactive desktop session verification:
+  > Terminal A (foreground daemon) + Terminal B (client invocations showing image swap on desktop), Escape key dismissal while daemon persists in background loop, and Ctrl+C clean exit.
 
 ---
 
@@ -126,7 +164,7 @@ Verified against pinned dependencies (`gtk4 0.11.5`, `gio 0.22.10`, `glib 0.22.1
 ## Open Questions for Planner
 1. **GitHub Remote Push Credentials**:
    - `git push -u origin main` prompts for GitHub credentials over HTTPS (`https://github.com/simoabid/QuickPeek.git`). Human verification/action required to cache credentials or set up SSH key so background pushes can succeed unattended.
-2. **Phase 2 & Phase 3 Roadmap Ordering**:
-   - Planner decision notes indicate Phase 2 (AT-SPI file manager selection detection) vs Phase 3 (image format expansion: WebP/SVG/GIF). Is AT-SPI selection detection the next priority for Phase 2?
-3. **Dolphin AT-SPI Strategy**:
-   - In standalone Wayland compositors (Niri/Hyprland without full KDE Plasma), Dolphin requires `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`. Should QuickPeek document this requirement for users or implement a fallback to `org.freedesktop.FileManager1`?
+2. **Phase 3 Preview Format Decoder Dependencies**:
+   - Phase 3 expands image preview support to WebP, SVG, and animated GIF. With `gtk4 = "0.11"` relying on `gdk::Texture::from_file` and system `gdk-pixbuf2` loaders, will we rely on GDK's native loaders (which already decode SVG and WebP via librsvg / libwebp), or should we introduce explicit Rust decoding crates (e.g. `image` crate)?
+3. **Dolphin AT-SPI Environment Setup for Phase 4**:
+   - In standalone Wayland sessions (Niri/Hyprland), Dolphin only exposes AT-SPI when `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1` is exported in the user session. Shall Phase 4 assume this environment variable is set by the user/systemd session, or should QuickPeek also probe for Dolphin's window via compositor IPC (`niri msg` / `hyprctl`)?

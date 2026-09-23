@@ -144,10 +144,26 @@ QuickPeek is a lightweight, responsive Linux space-to-preview file viewer that r
 - **crates.io** (`https://crates.io/api/v1/crates/quickpeek`):
   404 Not Found (`crate quickpeek does not exist`). The name is completely unclaimed on crates.io.
 
-## Architecture Plan
-All architecture items below are marked **PLANNED (evidence pending)**:
-- `[PLANNED]` Single native GTK4 binary written in Rust using `gtk4-rs` (`gtk4 = "0.11.5"`).
-- `[PLANNED]` D-Bus single-instance daemon owning `org.quickpeek.QuickPeek` on the session bus, implementing `ShowFile(path: String)`, `Toggle()`, and `Close()`.
+## Architecture & Implementation State
+- `[PROVEN - Phase 1]` Single native GTK4 binary written in Rust using `gtk4-rs` (`gtk4 = "0.11.5"`).
+- `[PROVEN - Phase 2]` D-Bus single-instance daemon owning `org.quickpeek.QuickPeek` on the session bus with pre-GTK role split.
+  - **Service**: `org.quickpeek.QuickPeek`
+  - **Object Path**: `/org/quickpeek/QuickPeek`
+  - **Interface**: `org.quickpeek.QuickPeek`
+  - **Methods**:
+    - `ShowFile(in s path, out b ok, out s message)`: Displays the image at `path`. Swaps the image if the window is already open. Returns `ok=true, message=""` on success, or `ok=false, message="<error>"` on missing file or decode failure.
+    - `Quit()`: Closes window, releases bus name, cleanly terminates event loop and daemon process with exit code 0.
+  - **Role Decision Semantics**:
+    - Synchronous `RequestName` call executed via `gtk4::gio` on `DBusConnection` before any `gtk::init()` call.
+    - Reply 1 (`PRIMARY_OWNER`): Bus name acquired; process assumes **Daemon** role, initializes GTK4, registers `/org/quickpeek/QuickPeek`, displays preview window, and runs GLib main event loop.
+    - Reply 3 (`EXISTS`): Bus name already owned; process assumes **Client** role, never initializes GTK4, invokes `ShowFile(path)` synchronously with a 2000 ms timeout, prints latency, and exits.
+    - Other replies: Emits error to stderr and exits 1.
+  - **Instrumentation Grammar**:
+    - `MAP_MS <ms>`: Daemon, printed once at first window map (`connect_map`).
+    - `CALL_MS <ms>`: Client, printed per invocation measuring synchronous D-Bus call round-trip.
+    - `WARM_MS <ms>`: Daemon, printed per image swap while the window is already mapped.
+  - **Daemon Lifecycle Decision**:
+    - Daemon runs in the foreground in v1/v2 (no fork, no daemonize); systemd user service handles background lifecycle in Phase 7.
 - `[PLANNED]` Compositor-configured keybindings (`Space` to toggle preview, `Escape` to close) bound in Hyprland (`hyprland.conf`) and Niri (`config.kdl`) invoking `quickpeek` CLI / D-Bus method.
 - `[PLANNED]` Active file selection discovery via the AT-SPI2 accessibility D-Bus (`unix:path=/run/user/$UID/at-spi/bus_0`), querying the focused file manager view's selected accessible items.
 
@@ -159,11 +175,16 @@ All architecture items below are marked **PLANNED (evidence pending)**:
 
 ## Crate Layout
 - **Root Product Crate (`quickpeek`)**:
-  - `Cargo.toml`: defines root `quickpeek` binary crate with `gtk4 = "0.11"` dependency.
-  - `Cargo.lock`: pinned and committed dependencies.
+  - `Cargo.toml`: defines root `quickpeek` binary crate with `gtk4 = "0.11"` dependency (zero extra crates).
+  - `Cargo.lock`: pinned and committed dependencies (64 packages, 0 diff in Phase 2).
   - `.cargo/config.toml`: repo-level target linker fix (`[target.x86_64-unknown-linux-gnu] linker = "gcc"`).
-  - `src/main.rs`: product entrypoint, CLI validation, aspect-fit sizing math, GTK4 undecorated window display, and cold-start proxy measurement.
+  - `src/main.rs`: product entrypoint, pre-GTK role decision, daemon GTK loop, client fast path.
+  - `src/dbus.rs`: D-Bus constants, XML introspection, role types, `RequestName`, `call_show_file`, `register_server`.
+  - `src/window.rs`: `WindowManager`, aspect-fit math, texture loading/swapping, key handling, and window lifecycle.
+  - `tests/e2e_dbus.sh`: hermetic e2e test harness running under `dbus-run-session`.
   - `tests/fixtures/sample.png`: 64x64 RGBA test image fixture.
+  - `tests/fixtures/sample2.png`: 128x96 RGBA test image fixture for image swap tests.
+  - `tests/fixtures/notimage.txt`: non-image text fixture for decode rejection tests.
 - **Probe Crate (`probe/`)**:
   - Gitignored throwaway instrumentation crate for toolchain verification and asset generation.
 
