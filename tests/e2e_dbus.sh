@@ -346,6 +346,9 @@ if [ ! -f "$STATE_FILE" ]; then
 fi
 grep -q "tests/fixtures/sample.png" "$STATE_FILE"
 
+# Wait for open debounce to expire before toggle close
+sleep 0.15
+
 # No-args toggle close (TOGGLE_CLOSED)
 OUT_CLOSE=$("$REPO_ROOT/target/release/quickpeek")
 if [ -n "$OUT_CLOSE" ]; then
@@ -490,10 +493,59 @@ wait_for_name_released
 rm -f "$DAEMON_ERR"
 echo "Check 15 passed: stale selection handling verified."
 
+echo "=== 16. AT-SPI Fail-Open and Fallback (Hermetic) ==="
+# Under dbus-run-session there is no org.a11y.Bus.
+# The daemon must fail open: log ATSPI_UNAVAILABLE, fall back to persisted/memory,
+# successfully open the image, and stay <= 80 ms.
+mkdir -p "$XDG_STATE_HOME/quickpeek"
+echo "$REPO_ROOT/tests/fixtures/sample.png" > "$XDG_STATE_HOME/quickpeek/last_selection"
+
+> "$DAEMON_LOG"
+"$REPO_ROOT/target/release/quickpeek" --service > "$DAEMON_LOG" 2>&1 &
+DAEMON_PID=$!
+
+for i in {1..50}; do
+    if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner org.quickpeek.QuickPeek >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+# Timed toggle invocation
+TIMEFORMAT='%R'
+TOGGLE_TIME=$( { time "$REPO_ROOT/target/release/quickpeek" >/dev/null; } 2>&1 )
+echo "Fail-open toggle wall time: ${TOGGLE_TIME}s"
+
+for i in {1..30}; do
+    if grep -q "WINDOW_OPENED" "$DAEMON_LOG" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+grep -q "ATSPI_MS" "$DAEMON_LOG"
+grep -q "ATSPI_UNAVAILABLE" "$DAEMON_LOG"
+grep -q -E "SELECTION_FALLBACK (memory|persisted)" "$DAEMON_LOG"
+grep -q "WINDOW_OPENED" "$DAEMON_LOG"
+grep -q "TOGGLE_OPENED" "$DAEMON_LOG"
+
+# Verify timing <= 80ms
+TOGGLE_MS=$(awk -v t="$TOGGLE_TIME" 'BEGIN { printf "%.0f", t * 1000 }')
+if [ "$TOGGLE_MS" -gt 80 ]; then
+    echo "ERROR: Fail-open toggle took ${TOGGLE_MS}ms, exceeded 80ms budget"
+    exit 1
+fi
+
+# Clean Quit
+gdbus call --session --dest org.quickpeek.QuickPeek --object-path /org/quickpeek/QuickPeek --method org.quickpeek.QuickPeek.Quit
+wait "$DAEMON_PID" || true
+wait_for_name_released
+echo "Check 16 passed: AT-SPI fail-open and fallback verified within ${TOGGLE_MS}ms."
+
 # Verify sandboxed state file was used
 if [ ! -f "$TEST_STATE_DIR/quickpeek/last_selection" ]; then
     echo "ERROR: Sandboxed state file not created"
     exit 1
 fi
 
-echo "=== ALL 15 E2E D-BUS CHECKS PASSED ==="
+echo "=== ALL 16 E2E D-BUS CHECKS PASSED ==="
