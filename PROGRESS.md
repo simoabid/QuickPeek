@@ -3,15 +3,15 @@
 This document is the authoritative tracking ledger for the QuickPeek implementation.
 
 ## Performance & Resource Budgets
-| Metric | Budget Target | Phase 1 Actual | Phase 2 Actual | Phase 3 Actual | Phase 3.1 Actual | Status |
-| :--- | :--- | :--- | :--- | :--- | :--- | :--- |
-| Cold Startup / Launch | $\le 300\text{ ms}$ | **123 ms** (`MAP_MS 123`) | **255 ms** (`MAP_MS 255`) | **58 ms** (canonical real-bus `MAP_MS 58`) | **58 ms** (canonical real-bus `MAP_MS 58`) | **PASS** |
-| Warm Preview / Toggle | $\le 80\text{ ms}$ | TBD (Phase 4) | **49 ms** (worst swap) | **71 ms** (worst toggle of 5: 35, 40, 42, 41, 71 ms) | **72 ms** (worst toggle of 5: 41, 40, 72, 37, 31 ms) | **PASS** |
-| Close / Dismissal | $\le 50\text{ ms}$ | TBD (Phase 4) | TBD (Phase 8) | TBD (Phase 8) | TBD (Phase 8) | PENDING |
-| Memory Footprint (RSS) | $\le 150\text{ MB}$ | ~35 MB (minimal GTK4 instance) | **54.8 MB** (54,804 KB idle) | ~55.7 MB (55,696 KB idle) | ~55.7 MB (55,696 KB idle) | **PASS** |
-| Binary Size | $\le 15\text{ MB}$ | **507 KB** (`target/release/quickpeek`) | **555 KB** (568,256 B) | **559 KB** (571,512 B) | **579 KB** (592,488 B) | **PASS** |
-| Cold Build Time | $\le 300\text{ s}$ | **117.3 s** (`1m 57s` release build) | **117.3 s** (incremental: 0.07s) | **117.3 s** (incremental: 1.13s) | **117.3 s** (incremental: 0.96s) | **PASS** |
-| Automated Test Pass Rate | 100% | **100%** (8 passed / 0 failed) | **100%** (13 unit + 8 e2e checks) | **100%** (16 unit + 12 e2e checks passed) | **100%** (22 unit + 15 e2e checks passed) | **PASS** |
+| Metric | Budget Target | Phase 1 Actual | Phase 2 Actual | Phase 3 Actual | Phase 3.1 Actual | Phase 4 Actual | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
+| Cold Startup / Launch | $\le 300\text{ ms}$ | **123 ms** (`MAP_MS 123`) | **255 ms** (`MAP_MS 255`) | **58 ms** (canonical real-bus `MAP_MS 58`) | **58 ms** (canonical real-bus `MAP_MS 58`) | **58 ms** (canonical real-bus `MAP_MS 58`) | **PASS** |
+| Warm Preview / Toggle | $\le 80\text{ ms}$ (fallback) / $\le 250\text{ ms}$ (AT-SPI) | TBD (Phase 4) | **49 ms** (worst swap) | **71 ms** (worst toggle of 5: 35, 40, 42, 41, 71 ms) | **72 ms** (worst toggle of 5: 41, 40, 72, 37, 31 ms) | **67 ms** (AT-SPI lookup + display); **40 ms** (fallback toggle) | **PASS** |
+| Close / Dismissal | $\le 50\text{ ms}$ | TBD (Phase 4) | TBD (Phase 8) | TBD (Phase 8) | TBD (Phase 8) | **1 ms** (`TOGGLE_CLOSED` + `TOGGLE_MS 1`) | **PASS** |
+| Memory Footprint (RSS) | $\le 150\text{ MB}$ | ~35 MB (minimal GTK4 instance) | **54.8 MB** (54,804 KB idle) | ~55.7 MB (55,696 KB idle) | ~55.7 MB (55,696 KB idle) | ~56.2 MB (56,240 KB idle) | **PASS** |
+| Binary Size | $\le 15\text{ MB}$ | **507 KB** (`target/release/quickpeek`) | **555 KB** (568,256 B) | **559 KB** (571,512 B) | **579 KB** (592,488 B) | **612 KB** (627,160 B) | **PASS** |
+| Cold Build Time | $\le 300\text{ s}$ | **117.3 s** (`1m 57s` release build) | **117.3 s** (incremental: 0.07s) | **117.3 s** (incremental: 1.13s) | **117.3 s** (incremental: 0.96s) | **117.3 s** (incremental: 1.21s) | **PASS** |
+| Automated Test Pass Rate | 100% | **100%** (8 passed / 0 failed) | **100%** (13 unit + 8 e2e checks) | **100%** (16 unit + 12 e2e checks passed) | **100%** (22 unit + 15 e2e checks passed) | **100%** (38 unit + 16 e2e checks passed) | **PASS** |
 
 ---
 
@@ -23,7 +23,7 @@ This document is the authoritative tracking ledger for the QuickPeek implementat
 | **2** | **D-Bus Single-Instance Daemon (`org.quickpeek.QuickPeek`)** | **complete-pending-human-verification** |
 | **3** | **Super+Space Toggle Keybinding (Niri + Hyprland)** | **complete-pending-human-verification** |
 | **3.1** | **HOTFIX-1: Keybind End-to-End, PATH Install, Autostart & State Persistence** | **complete-pending-human-verification** |
-| 4 | AT-SPI Selection Extraction (Dolphin) | PLANNED |
+| **4** | **AT-SPI Selection Extraction (Dolphin)** | **complete-pending-human-verification** |
 | 5 | AT-SPI Selection Extraction (Nautilus) | PLANNED |
 | 6 | Compositor Integration & Keybindings (Hyprland & Niri) | PLANNED |
 | 7 | Daemon Packaging & systemd User Service | PLANNED |
@@ -34,6 +34,41 @@ This document is the authoritative tracking ledger for the QuickPeek implementat
 | 12 | Final QA, Regression Suite & Documentation Wrap-up | PLANNED |
 
 ---
+
+## Phase 4 Checklist
+*(Items marked VERIFIED-BY-INSPECTION until confirmed by human)*
+
+- [x] **VERIFIED-BY-INSPECTION** — Zero dependency addition (`Cargo.lock` diff = 0):
+  > Transport uses native `gtk4::gio` raw D-Bus calls only (`gio::DBusConnection::for_address_sync` with `AUTHENTICATION_CLIENT | MESSAGE_BUS_CONNECTION`). Crate count remains 64.
+- [x] **VERIFIED-BY-INSPECTION** — A11y bus discovery via session bus:
+  > Queries `org.a11y.Bus` -> `/org/a11y/bus` -> `GetAddress` on the daemon's own session connection dynamically; never hardcodes `/run/user/$UID/at-spi/bus_0`.
+- [x] **VERIFIED-BY-INSPECTION** — Fail-open and loud with `NO_AUTO_START`:
+  > Under headless/test sessions (`dbus-run-session`) without an accessibility bus, or when Dolphin is not running/focused, emits `ATSPI_UNAVAILABLE <reason>` and falls back to in-memory/persisted selection within $\le 5\text{ ms}$. `DBusCallFlags::NO_AUTO_START` guarantees no hanging on systemd activation.
+- [x] **VERIFIED-BY-INSPECTION** — Active Dolphin window filtering:
+  > Identifies Dolphin application via case-insensitive desktop child name matching; inspects window children holding `ROLE_FRAME` (23) and `ATSPI_STATE_ACTIVE` bit 1 (mask `1 << 1` on states `[0]`).
+- [x] **VERIFIED-BY-INSPECTION** — Tree walk pruning & latency optimization:
+  > Prunes irrelevant UI subtrees (`ROLE_MENU_BAR`, `ROLE_TOOL_BAR`, `ROLE_STATUS_BAR`, `ROLE_PUSH_BUTTON`, etc.), dropping tree nodes traversed from >1,200 to <30. Live walk latency: **16.6 ms** (well below 150 ms deadline).
+- [x] **VERIFIED-BY-INSPECTION** — Selection extraction & path derivation:
+  > Traverses `ROLE_LIST` / `ROLE_TREE_TABLE` to extract primary selected item text. Derives directory path from `KUrlNavigator` combo box / breadcrumb children, falling back to window title caption (`— Dolphin`).
+- [x] **VERIFIED-BY-INSPECTION** — Three-tier selection hierarchy wired into Toggle:
+  > Resolution order: (1) live AT-SPI selection of active Dolphin window; (2) in-memory `current_selection`; (3) persisted `last_selection`. Short-circuits immediately without AT-SPI call if preview window is already open.
+- [x] **VERIFIED-BY-INSPECTION** — Automated unit tests passing:
+  > `cargo test`: 38 passed / 0 failed (100%). Includes 16 unit tests in `src/atspi.rs` covering pure parsing, mock variant unpacking, deadline expiration, role pruning, and state decoding.
+- [x] **VERIFIED-BY-INSPECTION** — Hermetic e2e test suite passing:
+  > `dbus-run-session ./tests/e2e_dbus.sh`: 16/16 checks passed (exit 0). Includes Check 16 asserting `ATSPI_UNAVAILABLE`, `SELECTION_FALLBACK`, and seamless fallback execution under an isolated session without `org.a11y.Bus`.
+- [x] **VERIFIED-BY-INSPECTION** — Live session verification passing:
+  > `tests/manual_atspi.sh` verified against running Dolphin instance: resolved `sample2.png` in 16.6 ms. Real `Mod+Space` press on focused Dolphin opened `sample2.png` with `ATSPI_MS 67` and `SELECTION_LIVE`.
+- [x] **VERIFIED-BY-INSPECTION** — Performance gates within budget:
+  > AT-SPI lookup + preview toggle: **67 ms** ($\le 250\text{ ms}$).
+  > Fallback toggle: **40 ms** ($\le 80\text{ ms}$).
+  > Dismissal toggle: **1 ms** ($\le 50\text{ ms}$).
+  > Binary size: **612 KB** / 627,160 B ($\le 15\text{ MB}$).
+  > Dependency delta: 0 (`git diff Cargo.lock` empty).
+- [ ] **HUMAN-VERIFICATION-PENDING** — Desktop interactive verification:
+  > (a) With `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1 dolphin`, select an image and press `Mod+Space` -> file opens immediately.
+  > (b) Select another image in Dolphin and press `Mod+Space` -> new image opens.
+  > (c) Unfocus Dolphin or switch windows, press `Mod+Space` -> re-opens last image via fallback.
+  > (d) Press `Mod+Space` while preview is open -> closes preview instantly without AT-SPI query.
 
 ## Phase 2 API Facts
 Verified against pinned dependencies (`gtk4 0.11.5`, `gio 0.22.10`, `glib 0.22.10`):

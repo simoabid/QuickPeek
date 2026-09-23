@@ -166,13 +166,13 @@ QuickPeek is a lightweight, responsive Linux space-to-preview file viewer that r
     - Window open: destroys window, logs `TOGGLE_CLOSED` + `TOGGLE_MS <ms>`, returns `(true, "")`.
     - Window closed + `current_selection` exists: displays preview window, logs `TOGGLE_OPENED` + `WINDOW_OPENED` + `WARM_MS <ms>` + `TOGGLE_MS <ms>`, returns `(true, "")`.
     - Window closed + `current_selection` is `None`: returns `(false, "no file to preview")`.
-  - **CLI Contract (Amended in Phase 3.1)**:
+  - **CLI Contract (Amended in Phase 4)**:
 
     | Invocation | Daemon State | Behavior |
     | :--- | :--- | :--- |
-    | `quickpeek <path>` | any | ShowFile; persists selection |
-    | `quickpeek` (no args) | running | Toggle() (unchanged) |
-    | `quickpeek` (no args) | NOT running | start daemon + OPEN persisted selection; if none, silent start (service mode, no window) |
+    | `quickpeek <path>` | any | ShowFile; persists selection (unchanged) |
+    | `quickpeek` (no args) | running | Toggle(): if open, close; if closed, open (1) live Dolphin AT-SPI selection, (2) in-memory selection, (3) persisted selection |
+    | `quickpeek` (no args) | NOT running | start daemon + OPEN (1) live Dolphin AT-SPI selection, (2) persisted selection; if none, silent start (service mode) |
     | `quickpeek --service` | NOT running | start daemon only; NEVER opens a window (autostart) |
     | `quickpeek --service` | running | exit 0 silently (idempotent — autostart never errs) |
 
@@ -185,10 +185,16 @@ QuickPeek is a lightweight, responsive Linux space-to-preview file viewer that r
     ```
     "ROLE DAEMON" | "ROLE CLIENT" | "WINDOW_OPENED" | "IMAGE_SWAPPED" | "WINDOW_CLOSED" |
     "DAEMON_QUIT" | "TOGGLE_OPENED" | "TOGGLE_CLOSED" | "SELECTION_RESTORED <path>" |
-    "SELECTION_NONE" | "MAP_MS <n>" | "CALL_MS <n>" | "WARM_MS <n>" | "TOGGLE_MS <n>"
+    "SELECTION_NONE" | "SELECTION_LIVE <path>" | "SELECTION_FALLBACK <memory|persisted|none>" |
+    "ATSPI_MS <n>" | "ATSPI_UNAVAILABLE <reason>" | "MAP_MS <n>" | "CALL_MS <n>" |
+    "WARM_MS <n>" | "TOGGLE_MS <n>"
     ```
     - `SELECTION_RESTORED <path>`: emitted once at daemon start when persisted selection exists.
     - `SELECTION_NONE`: emitted once at daemon start when no persisted selection exists.
+    - `SELECTION_LIVE <path>`: emitted when an open trigger resolves a selected file from the active Dolphin window via AT-SPI.
+    - `SELECTION_FALLBACK <memory|persisted|none>`: emitted when AT-SPI resolution is unavailable/inapplicable, indicating fallback target.
+    - `ATSPI_MS <n>`: measured duration in milliseconds of the AT-SPI discovery attempt.
+    - `ATSPI_UNAVAILABLE <reason>`: emitted whenever AT-SPI discovery fails or is skipped (fail-open loud).
     - `WARM_MS <n>`: image display completion (emitted on swap, toggle-open, or initial open).
     - `MAP_MS <n>`: additionally emitted on each window map event (canonical real-bus baseline: **58 ms**).
     - `TOGGLE_MS <n>`: measured from D-Bus handler entry to toggle action completion (both directions).
@@ -197,7 +203,14 @@ QuickPeek is a lightweight, responsive Linux space-to-preview file viewer that r
     - **Hyprland (`~/.config/hypr/hyprland.conf`)**: `bind = SUPER, space, exec, quickpeek` (documented in `docs/keybindings.md`; live verification pending human login).
     - **Compositor-Global Dispatch**: Shortcut triggers regardless of focused window, unlike `Escape` which requires preview window focus.
     - **Bare-Space Stretch Note**: Unmodified `Space` preview is explicitly a Phase 8 stretch experiment exploring window-context filtering and synthetic key re-injection.
-- `[PLANNED]` Active file selection discovery via the AT-SPI2 accessibility D-Bus (`unix:path=/run/user/$UID/at-spi/bus_0`), querying the focused file manager view's selected accessible items (Phase 4 Dolphin, Phase 5 Nautilus).
+- `[PROVEN - Phase 4]` Active file selection discovery via AT-SPI2 for Dolphin:
+  - **Transport**: Native `gtk4::gio` raw D-Bus calls only (`gio::DBusConnection::for_address_sync` with `AUTHENTICATION_CLIENT | MESSAGE_BUS_CONNECTION`). Zero new crates (`Cargo.lock` diff = 0).
+  - **Dynamic Bus Discovery**: Queries `org.a11y.Bus` -> `/org/a11y/bus` -> `GetAddress` on the daemon's own session connection dynamically.
+  - **Fail-Open Loud & Safe Calls**: Every call specifies `DBusCallFlags::NO_AUTO_START` preventing systemd auto-activation hangs. Failures emit `ATSPI_UNAVAILABLE <reason>` and fall back within $\le 5\text{ ms}$.
+  - **Active Window Filter**: Locates Dolphin among desktop children; inspects window children with `ROLE_FRAME` (23) and `ATSPI_STATE_ACTIVE` bit 1 (mask `1 << 1` on states `[0]`).
+  - **Pruned Tree Walk**: Prunes menu bars, toolbars, status bars, and buttons to bound traversal to <30 nodes, running in 16.6 ms (well below 150 ms hard deadline).
+  - **Path Derivation**: Traverses `ROLE_LIST` / `ROLE_TREE_TABLE` to extract primary selected item text. Derives directory path from `KUrlNavigator` combo box / breadcrumb children, falling back to window title caption (`— Dolphin`).
+  - Nautilus AT-SPI selection discovery planned for Phase 5.
 
 ## Conventions
 - **Git Branch**: `main` as the default development and production branch.
@@ -208,12 +221,15 @@ QuickPeek is a lightweight, responsive Linux space-to-preview file viewer that r
 ## Crate Layout
 - **Root Product Crate (`quickpeek`)**:
   - `Cargo.toml`: defines root `quickpeek` binary crate with `gtk4 = "0.11"` dependency (zero extra crates).
-  - `Cargo.lock`: pinned and committed dependencies (64 packages, 0 diff in Phase 2).
+  - `Cargo.lock`: pinned and committed dependencies (64 packages, 0 diff in Phase 2, Phase 3, and Phase 4).
   - `.cargo/config.toml`: repo-level target linker fix (`[target.x86_64-unknown-linux-gnu] linker = "gcc"`).
   - `src/main.rs`: product entrypoint, pre-GTK role decision, daemon GTK loop, client fast path.
   - `src/dbus.rs`: D-Bus constants, XML introspection, role types, `RequestName`, `call_show_file`, `register_server`.
   - `src/window.rs`: `WindowManager`, aspect-fit math, texture loading/swapping, key handling, and window lifecycle.
-  - `tests/e2e_dbus.sh`: hermetic e2e test harness running under `dbus-run-session`.
+  - `src/atspi.rs`: AT-SPI D-Bus client, role pruning, active window detection, selection extraction, and unit tests.
+  - `tests/e2e_dbus.sh`: hermetic e2e test harness running under `dbus-run-session` (16 automated checks).
+  - `tests/manual_atspi.sh`: live Dolphin AT-SPI verification script.
+  - `docs/selection.md`: Dolphin environment setup (`QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`), AT-SPI architecture, and resolution hierarchy.
   - `tests/fixtures/sample.png`: 64x64 RGBA test image fixture.
   - `tests/fixtures/sample2.png`: 128x96 RGBA test image fixture for image swap tests.
   - `tests/fixtures/notimage.txt`: non-image text fixture for decode rejection tests.

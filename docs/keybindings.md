@@ -81,11 +81,12 @@ bind = SUPER, space, exec, quickpeek
 
 ## 5. How Keybindings & Persistence Work
 
-- **Cold-Press & Persistence Semantics**:
-  - `Mod+Space` re-opens your last previewed file even after reboot; live file-manager selection = Phase 4.
+- **Live Dolphin Selection & Persistence Semantics**:
+  - When Dolphin is focused and has a selected file, `Mod+Space` extracts that file live via AT-SPI and opens it immediately. See [docs/selection.md](selection.md) for full setup instructions (e.g. `QT_LINUX_ACCESSIBILITY_ALWAYS_ON=1`).
+  - When Dolphin is unfocused, has no selection, or AT-SPI is unavailable, QuickPeek falls back seamlessly: first to the in-memory last previewed file, then to the persisted file.
   - QuickPeek persists your last previewed file path atomically to `$XDG_STATE_HOME/quickpeek/last_selection` (`~/.local/state/quickpeek/last_selection`).
-  - If the daemon is not running when you press `Mod+Space`, it cold-starts and immediately opens the persisted selection without requiring a second keypress.
-  - If no persisted selection exists or the file was deleted, it starts silently in service mode.
+  - If the daemon is not running when you press `Mod+Space`, it cold-starts and opens the active selection (or persisted selection) immediately.
+  - If no selection exists or the file was deleted, it starts silently in service mode.
 
 - **Compositor-Global Dispatch**:
   - `Mod+Space` (or `Super+Space`) is intercepted and handled by the compositor directly.
