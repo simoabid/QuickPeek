@@ -2,9 +2,12 @@ use gtk4::gdk;
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Instant;
 
+#[allow(dead_code)]
 pub fn validate_cli_path(args: &[String]) -> Result<PathBuf, String> {
     if args.len() < 2 {
         return Err("missing image path argument".to_string());
@@ -70,6 +73,7 @@ pub struct WindowManager {
     display: gdk::Display,
     window: Option<gtk4::Window>,
     picture: Option<gtk4::Picture>,
+    is_open: Rc<Cell<bool>>,
 }
 
 impl WindowManager {
@@ -88,19 +92,15 @@ impl WindowManager {
             display,
             window: None,
             picture: None,
+            is_open: Rc::new(Cell::new(false)),
         }
     }
 
-
-    pub fn show_file<F>(
+    pub fn show_file(
         &mut self,
         path: &Path,
         start_time: Instant,
-        on_close: F,
-    ) -> Result<(), String>
-    where
-        F: Fn() + Clone + 'static,
-    {
+    ) -> Result<(), String> {
         if !path.exists() {
             return Err(format!("file not found: {}", path.display()));
         }
@@ -131,72 +131,77 @@ impl WindowManager {
 
         let show_start = Instant::now();
 
-        if let (Some(win), Some(pic)) = (&self.window, &self.picture) {
-            pic.set_paintable(Some(&texture));
-            pic.set_size_request(target_w, target_h);
-            win.set_default_size(target_w, target_h);
-            win.present();
+        if self.is_open.get() {
+            if let (Some(win), Some(pic)) = (&self.window, &self.picture) {
+                pic.set_paintable(Some(&texture));
+                pic.set_size_request(target_w, target_h);
+                win.set_default_size(target_w, target_h);
+                win.present();
 
-            println!("IMAGE_SWAPPED");
-            println!("SHOW_MS {}", show_start.elapsed().as_millis());
-        } else {
-            let window = gtk4::Window::new();
-            window.add_css_class("quickpeek-window");
-            window.set_decorated(false);
-            window.set_default_size(target_w, target_h);
-
-            let picture = gtk4::Picture::for_paintable(&texture);
-            picture.set_can_shrink(true);
-            picture.set_size_request(target_w, target_h);
-            window.set_child(Some(&picture));
-
-            let map_start = start_time;
-            window.connect_map(move |_| {
-                let elapsed = map_start.elapsed().as_millis();
-                println!("MAP_MS {}", elapsed);
-            });
-
-            let key_controller = gtk4::EventControllerKey::new();
-            let win_for_key = window.clone();
-            key_controller.connect_key_pressed(move |_ctrl, key, _keycode, _state| {
-                if key == gdk::Key::Escape {
-                    win_for_key.close();
-                    glib::Propagation::Stop
-                } else {
-                    glib::Propagation::Proceed
-                }
-            });
-            window.add_controller(key_controller);
-
-            window.connect_close_request({
-                let on_close = on_close.clone();
-                move |_| {
-                    on_close();
-                    glib::Propagation::Proceed
-                }
-            });
-
-            window.present();
-
-            println!("WINDOW_OPENED");
-            println!("SHOW_MS {}", show_start.elapsed().as_millis());
-
-            self.window = Some(window);
-            self.picture = Some(picture);
+                println!("IMAGE_SWAPPED");
+                println!("SHOW_MS {}", show_start.elapsed().as_millis());
+                return Ok(());
+            }
         }
 
-        Ok(())
-    }
+        let window = gtk4::Window::new();
+        window.add_css_class("quickpeek-window");
+        window.set_decorated(false);
+        window.set_default_size(target_w, target_h);
 
-    pub fn mark_closed(&mut self) {
-        self.window = None;
-        self.picture = None;
+        let picture = gtk4::Picture::for_paintable(&texture);
+        picture.set_can_shrink(true);
+        picture.set_size_request(target_w, target_h);
+        window.set_child(Some(&picture));
+
+        let map_start = start_time;
+        window.connect_map(move |_| {
+            let elapsed = map_start.elapsed().as_millis();
+            println!("MAP_MS {}", elapsed);
+        });
+
+        let key_controller = gtk4::EventControllerKey::new();
+        let win_for_key = window.clone();
+        key_controller.connect_key_pressed(move |_ctrl, key, _keycode, _state| {
+            if key == gdk::Key::Escape {
+                win_for_key.close();
+                glib::Propagation::Stop
+            } else {
+                glib::Propagation::Proceed
+            }
+        });
+        window.add_controller(key_controller);
+
+        let is_open_clone = self.is_open.clone();
+        self.is_open.set(true);
+
+        window.connect_close_request(move |_| {
+            if is_open_clone.get() {
+                is_open_clone.set(false);
+                println!("WINDOW_CLOSED");
+            }
+            glib::Propagation::Proceed
+        });
+
+        window.present();
+
+        println!("WINDOW_OPENED");
+        println!("SHOW_MS {}", show_start.elapsed().as_millis());
+
+        self.window = Some(window);
+        self.picture = Some(picture);
+
+        Ok(())
     }
 
     pub fn close_window(&mut self) {
         if let Some(win) = self.window.take() {
             self.picture = None;
-            win.close();
+            if self.is_open.get() {
+                self.is_open.set(false);
+                win.close();
+                println!("WINDOW_CLOSED");
+            }
         }
     }
 }

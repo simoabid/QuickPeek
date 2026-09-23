@@ -54,13 +54,7 @@ fn main() {
 
                 let mut ctx_borrow = ctx_clone.borrow_mut();
                 if let Some(ctx) = ctx_borrow.as_mut() {
-                    let ctx_for_close = ctx_clone.clone();
-                    match ctx.wm.show_file(&path, show_start, move || {
-                        println!("WINDOW_CLOSED");
-                        if let Some(c) = ctx_for_close.borrow_mut().as_mut() {
-                            c.wm.mark_closed();
-                        }
-                    }) {
+                    match ctx.wm.show_file(&path, show_start) {
                         Ok(()) => {
                             invocation.return_value(Some(&(true, "").to_variant()));
                         }
@@ -77,9 +71,14 @@ fn main() {
                 if let Some(ctx) = ctx_borrow.as_mut() {
                     ctx.wm.close_window();
                     println!("DAEMON_QUIT");
-                    ctx.main_loop.quit();
+                    let loop_clone = ctx.main_loop.clone();
+                    invocation.return_value(None);
+                    glib::idle_add_local_once(move || {
+                        loop_clone.quit();
+                    });
+                } else {
+                    invocation.return_value(None);
                 }
-                invocation.return_value(None);
             }
             _ => {
                 invocation.return_dbus_error(
@@ -140,17 +139,12 @@ fn main() {
             };
             *daemon_ctx.borrow_mut() = Some(context);
 
-            let ctx_for_close = daemon_ctx.clone();
-            let initial_show = daemon_ctx.borrow_mut().as_mut().unwrap().wm.show_file(
-                &abs_path,
-                start_time,
-                move || {
-                    println!("WINDOW_CLOSED");
-                    if let Some(c) = ctx_for_close.borrow_mut().as_mut() {
-                        c.wm.mark_closed();
-                    }
-                },
-            );
+            let initial_show = daemon_ctx
+                .borrow_mut()
+                .as_mut()
+                .unwrap()
+                .wm
+                .show_file(&abs_path, start_time);
 
             if let Err(err) = initial_show {
                 eprintln!("Error: {}", err);
