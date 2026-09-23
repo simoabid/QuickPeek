@@ -3,15 +3,15 @@
 This document is the authoritative tracking ledger for the QuickPeek implementation.
 
 ## Performance & Resource Budgets
-| Metric | Budget Target | Phase 1 Actual | Phase 2 Actual | Status |
-| :--- | :--- | :--- | :--- | :--- |
-| Cold Startup / Launch | $\le 300\text{ ms}$ | **123 ms** (`MAP_MS 123`) | **255 ms** (`MAP_MS 255`) | **PASS** |
-| Warm Preview Display | $\le 80\text{ ms}$ | TBD (Phase 4) | **49 ms** (worst-of-5: 34ms, 35ms, 49ms, 34ms, 36ms) | **PASS** |
-| Close / Dismissal | $\le 50\text{ ms}$ | TBD (Phase 4) | TBD (Phase 8) | PENDING |
-| Memory Footprint (RSS) | $\le 150\text{ MB}$ | ~35 MB (minimal GTK4 instance) | **54.8 MB** (54,804 KB idle GTK4 daemon) | **PASS** |
-| Binary Size | $\le 15\text{ MB}$ | **507 KB** (`target/release/quickpeek`) | **555 KB** (568,256 B) | **PASS** |
-| Cold Build Time | $\le 300\text{ s}$ | **117.3 s** (`1m 57s` release build) | **117.3 s** (incremental: 0.07s) | **PASS** |
-| Automated Test Pass Rate | 100% | **100%** (8 passed / 0 failed) | **100%** (13 cargo unit + 8 e2e dbus checks passed) | **PASS** |
+| Metric | Budget Target | Phase 1 Actual | Phase 2 Actual | Phase 3 Actual | Status |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| Cold Startup / Launch | $\le 300\text{ ms}$ | **123 ms** (`MAP_MS 123`) | **255 ms** (`MAP_MS 255`) | **58 ms** (canonical real-bus `MAP_MS 58`) | **PASS** |
+| Warm Preview / Toggle | $\le 80\text{ ms}$ | TBD (Phase 4) | **49 ms** (worst swap) | **71 ms** (worst toggle of 5: 35, 40, 42, 41, 71 ms) | **PASS** |
+| Close / Dismissal | $\le 50\text{ ms}$ | TBD (Phase 4) | TBD (Phase 8) | TBD (Phase 8) | PENDING |
+| Memory Footprint (RSS) | $\le 150\text{ MB}$ | ~35 MB (minimal GTK4 instance) | **54.8 MB** (54,804 KB idle) | ~55.7 MB (55,696 KB idle) | **PASS** |
+| Binary Size | $\le 15\text{ MB}$ | **507 KB** (`target/release/quickpeek`) | **555 KB** (568,256 B) | **559 KB** (571,512 B) | **PASS** |
+| Cold Build Time | $\le 300\text{ s}$ | **117.3 s** (`1m 57s` release build) | **117.3 s** (incremental: 0.07s) | **117.3 s** (incremental: 1.13s) | **PASS** |
+| Automated Test Pass Rate | 100% | **100%** (8 passed / 0 failed) | **100%** (13 unit + 8 e2e checks) | **100%** (16 unit + 12 e2e checks passed) | **PASS** |
 
 ---
 
@@ -20,8 +20,8 @@ This document is the authoritative tracking ledger for the QuickPeek implementat
 | :---: | :--- | :---: |
 | **0** | **Reconnaissance & Environment Verification** | **COMPLETE** |
 | **1** | **Skeleton — Single Image Preview Window** | **COMPLETE** |
-| **2** | **D-Bus Single-Instance Daemon (`org.quickpeek.QuickPeek`)** | **COMPLETE** |
-| 3 | Image Formats Expansion: WebP, SVG, Animated GIF | PLANNED |
+| **2** | **D-Bus Single-Instance Daemon (`org.quickpeek.QuickPeek`)** | **complete-pending-human-verification** |
+| **3** | **Super+Space Toggle Keybinding (Niri + Hyprland)** | **complete-pending-human-verification** |
 | 4 | AT-SPI Selection Extraction (Dolphin) | PLANNED |
 | 5 | AT-SPI Selection Extraction (Nautilus) | PLANNED |
 | 6 | Compositor Integration & Keybindings (Hyprland & Niri) | PLANNED |
@@ -56,6 +56,45 @@ Verified against pinned dependencies (`gtk4 0.11.5`, `gio 0.22.10`, `glib 0.22.1
    - `/usr/bin/dbus-run-session` (present)
    - `/usr/bin/gdbus` (present)
    - `/usr/bin/busctl` (present)
+
+---
+
+## Phase 3 Checklist
+*(Items marked VERIFIED-BY-INSPECTION until confirmed by human)*
+
+- [x] **VERIFIED-BY-INSPECTION** — Real-bus cold start probe establishes canonical MAP_MS:
+  > Command: `target/release/quickpeek tests/fixtures/sample.png` on active Niri session bus.
+  > Output: `ROLE DAEMON`, `MAP_MS 58`, `WINDOW_OPENED`, `WARM_MS 17`. Reconciles Phase 1 (123 ms) vs Phase 2 (255 ms private test bus activation overhead). Canonical figure: **58 ms** ($\le 300\text{ ms}$: **PASS**).
+- [x] **VERIFIED-BY-INSPECTION** — D-Bus `Toggle()` method implemented and introspectable:
+  > Interface `org.quickpeek.QuickPeek` at `/org/quickpeek/QuickPeek` exports `Toggle() -> (b ok, s message)`.
+  > Window open -> destroys window, prints `TOGGLE_CLOSED` + `TOGGLE_MS <ms>`, returns `(true, "")`.
+  > Window closed + selection exists -> displays image, prints `TOGGLE_OPENED` + `WINDOW_OPENED` + `WARM_MS <ms>` + `TOGGLE_MS <ms>`, returns `(true, "")`.
+  > Window closed + no selection -> returns `(false, "no file to preview")`.
+- [x] **VERIFIED-BY-INSPECTION** — CLI contract updated (no-args client vs service-mode daemon):
+  > No-args client invocation with daemon running triggers `Toggle()` and produces completely empty stdout on success (`[ -z "$OUT" ]`); emits `Error: <msg>` to stderr on failure.
+  > No-args invocation with bus name free starts daemon in service mode (`ROLE DAEMON`), running main loop without opening window or setting selection.
+- [x] **VERIFIED-BY-INSPECTION** — Invalid cold start daemon persistence:
+  > Cold start with nonexistent/invalid path logs `ROLE DAEMON`, prints `Error: <msg>` to stderr, displays no window, and remains running to serve future requests.
+- [x] **VERIFIED-BY-INSPECTION** — Niri `Mod+Space` takeover applied and validated:
+  > `Mod+Space` DMS spotlight launcher commented out with revert path documented; DMS launcher remains active on `Mod+D`.
+  > `Mod+Space hotkey-overlay-title="QuickPeek Preview" { spawn "quickpeek"; }` inserted and validated via `niri validate` (exit 0).
+  > `diff -u` against `~/.config/niri/config.kdl.quickpeek-backup` confirms only intended changes.
+- [x] **VERIFIED-BY-INSPECTION** — Automated unit and hermetic E2E test suites passing:
+  > `cargo test`: 16 passed / 0 failed (100%).
+  > `dbus-run-session ./tests/e2e_dbus.sh`: 12/12 checks passed (exit 0).
+- [x] **VERIFIED-BY-INSPECTION** — Performance gates within budget:
+  > Toggle timing worst of 5: **71 ms** ($\le 80\text{ ms}$).
+  > Cold startup MAP_MS: **58 ms** ($\le 300\text{ ms}$).
+  > Binary size: **559 KB** / 571,512 B ($\le 15\text{ MB}$).
+  > Incremental build time: **1.13 s**.
+  > Dependency delta: 0 (`git diff Cargo.lock` empty).
+- [ ] **HUMAN-VERIFICATION-PENDING** — Desktop keybinding & launcher coexistence:
+  > (a) Pressing `Mod+Space` anywhere toggles preview open/closed regardless of window focus;
+  > (b) `Mod+D` still opens DMS spotlight launcher;
+  > (c) Niri desktop remains fully operational;
+  > (d) Backup file `~/.config/niri/config.kdl.quickpeek-backup` exists;
+  > (e) `pkill -x quickpeek` stops the daemon;
+  > (f) User veto path: revert to original DMS config if desired by uncommenting the marked block.
 
 ---
 

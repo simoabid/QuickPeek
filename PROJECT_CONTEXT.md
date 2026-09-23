@@ -156,16 +156,35 @@ QuickPeek is a lightweight, responsive Linux space-to-preview file viewer that r
   - **Role Decision Semantics**:
     - Synchronous `RequestName` call executed via `gtk4::gio` on `DBusConnection` before any `gtk::init()` call.
     - Reply 1 (`PRIMARY_OWNER`): Bus name acquired; process assumes **Daemon** role, initializes GTK4, registers `/org/quickpeek/QuickPeek`, displays preview window, and runs GLib main event loop.
-    - Reply 3 (`EXISTS`): Bus name already owned; process assumes **Client** role, never initializes GTK4, invokes `ShowFile(path)` synchronously with a 2000 ms timeout, prints latency, and exits.
+    - Reply 3 (`EXISTS`): Bus name already owned; process assumes **Client** role, never initializes GTK4, invokes D-Bus method synchronously with a 2000 ms timeout, prints latency (if ShowFile), and exits.
     - Other replies: Emits error to stderr and exits 1.
-  - **Instrumentation Grammar**:
-    - `MAP_MS <ms>`: Daemon, printed once at first window map (`connect_map`).
-    - `CALL_MS <ms>`: Client, printed per invocation measuring synchronous D-Bus call round-trip.
-    - `WARM_MS <ms>`: Daemon, printed per image swap while the window is already mapped.
   - **Daemon Lifecycle Decision**:
     - Daemon runs in the foreground in v1/v2 (no fork, no daemonize); systemd user service handles background lifecycle in Phase 7.
-- `[PLANNED]` Compositor-configured keybindings (`Space` to toggle preview, `Escape` to close) bound in Hyprland (`hyprland.conf`) and Niri (`config.kdl`) invoking `quickpeek` CLI / D-Bus method.
-- `[PLANNED]` Active file selection discovery via the AT-SPI2 accessibility D-Bus (`unix:path=/run/user/$UID/at-spi/bus_0`), querying the focused file manager view's selected accessible items.
+- `[PROVEN - Phase 3]` Super+Space Toggle Keybinding & Compositor Integration.
+  - **D-Bus `Toggle()` Method**:
+    - Added to `org.quickpeek.QuickPeek` interface: `Toggle() -> (b ok, s message)`.
+    - Window open: destroys window, logs `TOGGLE_CLOSED` + `TOGGLE_MS <ms>`, returns `(true, "")`.
+    - Window closed + `current_selection` exists: displays preview window, logs `TOGGLE_OPENED` + `WINDOW_OPENED` + `WARM_MS <ms>` + `TOGGLE_MS <ms>`, returns `(true, "")`.
+    - Window closed + `current_selection` is `None`: returns `(false, "no file to preview")`.
+  - **CLI Contract**:
+    - `quickpeek` (no args) with daemon running: acts as silent toggle client (completely empty stdout on success; stderr `Error: <msg>` on failure).
+    - `quickpeek` (no args) with bus name free: starts daemon in **service mode** (`ROLE DAEMON`), running main loop without opening window or setting selection (autostart; first-press wart resolved by Phase 7 systemd unit).
+    - `quickpeek <path>` with bus name free: cold start with path. If path invalid, prints `Error: <msg>` to stderr, displays no window, and persists running as daemon.
+  - **Canonical Instrumentation Grammar**:
+    ```
+    "ROLE DAEMON" | "ROLE CLIENT" | "WINDOW_OPENED" | "IMAGE_SWAPPED" | "WINDOW_CLOSED" |
+    "DAEMON_QUIT" | "TOGGLE_OPENED" | "TOGGLE_CLOSED" | "MAP_MS <n>" | "CALL_MS <n>" |
+    "WARM_MS <n>" | "TOGGLE_MS <n>"
+    ```
+    - `WARM_MS <n>`: image display completion (emitted on swap, toggle-open, or initial open).
+    - `MAP_MS <n>`: additionally emitted on each window map event (canonical real-bus baseline: **58 ms**).
+    - `TOGGLE_MS <n>`: measured from D-Bus handler entry to toggle action completion (both directions).
+  - **Compositor Keybinding (Niri & Hyprland)**:
+    - **Niri (`~/.config/niri/config.kdl`)**: `Mod+Space hotkey-overlay-title="QuickPeek Preview" { spawn "quickpeek"; }`. Takes over `Mod+Space` from duplicate DMS spotlight launcher (DMS spotlight remains 100% active on `Mod+D`). Revert path: uncomment marked block in `config.kdl` or restore `~/.config/niri/config.kdl.quickpeek-backup`.
+    - **Hyprland (`~/.config/hypr/hyprland.conf`)**: `bind = SUPER, space, exec, quickpeek` (documented in `docs/keybindings.md`; live verification pending human login).
+    - **Compositor-Global Dispatch**: Shortcut triggers regardless of focused window, unlike `Escape` which requires preview window focus.
+    - **Bare-Space Stretch Note**: Unmodified `Space` preview is explicitly a Phase 8 stretch experiment exploring window-context filtering and synthetic key re-injection.
+- `[PLANNED]` Active file selection discovery via the AT-SPI2 accessibility D-Bus (`unix:path=/run/user/$UID/at-spi/bus_0`), querying the focused file manager view's selected accessible items (Phase 4 Dolphin, Phase 5 Nautilus).
 
 ## Conventions
 - **Git Branch**: `main` as the default development and production branch.
