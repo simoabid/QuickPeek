@@ -1,3 +1,4 @@
+mod atspi;
 mod dbus;
 mod state;
 mod window;
@@ -41,6 +42,7 @@ fn main() {
     // Race-free ordering: register the D-Bus object BEFORE acquiring the name
     let daemon_ctx: Rc<RefCell<Option<DaemonContext>>> = Rc::new(RefCell::new(None));
     let ctx_clone = daemon_ctx.clone();
+    let server_conn = conn.clone();
 
     let _reg_id = match dbus::register_server(&conn, move |method, params, invocation| {
         match method {
@@ -66,7 +68,7 @@ fn main() {
             "Toggle" => {
                 let mut ctx_borrow = ctx_clone.borrow_mut();
                 if let Some(ctx) = ctx_borrow.as_mut() {
-                    match ctx.wm.toggle() {
+                    match ctx.wm.toggle(&server_conn) {
                         Ok(()) => {
                             invocation.return_value(Some(&(true, "").to_variant()));
                         }
@@ -189,30 +191,63 @@ fn main() {
                 }
                 window::CliMode::Toggle => {
                     // Cold-toggle semantics: bare no-args invocation with bus name FREE
-                    // starts the daemon AND opens the persisted selection immediately.
-                    // If no persisted selection exists: silent service-mode start.
-                    match window::check_selection_path(persisted_selection.as_deref()) {
-                        window::SelectionCheck::Valid(ref path) => {
-                            let mut ctx_borrow = daemon_ctx.borrow_mut();
-                            if let Some(ctx) = ctx_borrow.as_mut() {
-                                let initial_show = ctx.wm.show_file(path, start_time);
-                                if let Err(err) = initial_show {
-                                    eprintln!("Error: {}", err);
+                    // starts the daemon AND opens resolved selection immediately.
+                    // Resolution order:
+                    // (1) live AT-SPI selection of active Dolphin window
+                    // (2) persisted last_selection (already loaded at daemon start)
+                    // If no selection source exists: silent start (service mode, no window).
+                    let cold_start = Instant::now();
+                    let atspi_deadline = cold_start + std::time::Duration::from_millis(150);
+
+                    let live_selection = match atspi::resolve_dolphin_selection(&conn, atspi_deadline) {
+                        Ok(path) => {
+                            let elapsed = cold_start.elapsed().as_millis();
+                            println!("ATSPI_MS {}", elapsed);
+                            println!("SELECTION_LIVE {}", path.display());
+                            Some(path)
+                        }
+                        Err(reason) => {
+                            let elapsed = cold_start.elapsed().as_millis();
+                            println!("ATSPI_MS {}", elapsed);
+                            println!("ATSPI_UNAVAILABLE {}", reason);
+                            None
+                        }
+                    };
+
+                    let target_path = if let Some(path) = live_selection {
+                        Some(path)
+                    } else {
+                        match window::check_selection_path(persisted_selection.as_deref()) {
+                            window::SelectionCheck::Valid(path) => {
+                                println!("SELECTION_FALLBACK persisted");
+                                Some(path)
+                            }
+                            window::SelectionCheck::Stale(path) => {
+                                println!("SELECTION_FALLBACK none");
+                                let mut ctx_borrow = daemon_ctx.borrow_mut();
+                                if let Some(ctx) = ctx_borrow.as_mut() {
+                                    ctx.wm.set_selection(None);
                                 }
+                                eprintln!(
+                                    "Error: last previewed file no longer exists: {}",
+                                    path.display()
+                                );
+                                None
+                            }
+                            window::SelectionCheck::None => {
+                                println!("SELECTION_FALLBACK none");
+                                None
                             }
                         }
-                        window::SelectionCheck::Stale(ref path) => {
-                            let mut ctx_borrow = daemon_ctx.borrow_mut();
-                            if let Some(ctx) = ctx_borrow.as_mut() {
-                                ctx.wm.set_selection(None);
+                    };
+
+                    if let Some(path) = target_path {
+                        let mut ctx_borrow = daemon_ctx.borrow_mut();
+                        if let Some(ctx) = ctx_borrow.as_mut() {
+                            let initial_show = ctx.wm.show_file(&path, start_time);
+                            if let Err(err) = initial_show {
+                                eprintln!("Error: {}", err);
                             }
-                            eprintln!(
-                                "Error: last previewed file no longer exists: {}",
-                                path.display()
-                            );
-                        }
-                        window::SelectionCheck::None => {
-                            // Silent start (service mode, no window)
                         }
                     }
                 }

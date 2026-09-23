@@ -50,6 +50,7 @@ pub fn check_selection_path(selection: Option<&Path>) -> SelectionCheck {
     }
 }
 
+#[allow(dead_code)]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub enum ToggleAction {
     Close,
@@ -57,6 +58,7 @@ pub enum ToggleAction {
     NoSelection,
 }
 
+#[allow(dead_code)]
 pub fn decide_toggle_action(window_open: bool, has_selection: bool) -> ToggleAction {
     if window_open {
         ToggleAction::Close
@@ -257,43 +259,84 @@ impl WindowManager {
         }
     }
 
-    pub fn toggle(&mut self) -> Result<(), String> {
-        match decide_toggle_action(self.is_open.get(), self.current_selection.is_some()) {
-            ToggleAction::Close => {
-                if let Some(open_time) = self.last_open_time {
-                    if open_time.elapsed() <= std::time::Duration::from_millis(120) {
-                        // Debounce: ignore rapid toggle close right after opening
-                        return Ok(());
-                    }
-                }
-                let toggle_start = Instant::now();
-                self.close_window();
-                println!("TOGGLE_CLOSED");
-                println!("TOGGLE_MS {}", toggle_start.elapsed().as_millis());
-                Ok(())
-            }
-            ToggleAction::Open => {
-                match check_selection_path(self.current_selection.as_deref()) {
-                    SelectionCheck::Valid(path) => {
-                        let toggle_start = Instant::now();
-                        println!("TOGGLE_OPENED");
-                        self.show_file(&path, toggle_start)?;
-                        println!("TOGGLE_MS {}", toggle_start.elapsed().as_millis());
-                        Ok(())
-                    }
-                    SelectionCheck::Stale(path) => {
-                        self.current_selection = None;
-                        Err(format!("last previewed file no longer exists: {}", path.display()))
-                    }
-                    SelectionCheck::None => {
-                        Err("no file to preview".to_string())
-                    }
+    pub fn toggle(&mut self, session_conn: &gio::DBusConnection) -> Result<(), String> {
+        if self.is_open.get() {
+            if let Some(open_time) = self.last_open_time {
+                if open_time.elapsed() <= std::time::Duration::from_millis(120) {
+                    // Debounce: ignore rapid toggle close right after opening
+                    return Ok(());
                 }
             }
-            ToggleAction::NoSelection => {
-                Err("no file to preview".to_string())
-            }
+            let toggle_start = Instant::now();
+            self.close_window();
+            println!("TOGGLE_CLOSED");
+            println!("TOGGLE_MS {}", toggle_start.elapsed().as_millis());
+            return Ok(());
         }
+
+        // Open trigger: 3-step resolution order
+        // (1) live AT-SPI selection of active Dolphin window
+        // (2) in-memory current_selection
+        // (3) persisted last_selection
+        let toggle_start = Instant::now();
+        let atspi_deadline = toggle_start + std::time::Duration::from_millis(150);
+
+        let live_selection = match crate::atspi::resolve_dolphin_selection(session_conn, atspi_deadline) {
+            Ok(path) => {
+                let elapsed = toggle_start.elapsed().as_millis();
+                println!("ATSPI_MS {}", elapsed);
+                println!("SELECTION_LIVE {}", path.display());
+                Some(path)
+            }
+            Err(reason) => {
+                let elapsed = toggle_start.elapsed().as_millis();
+                println!("ATSPI_MS {}", elapsed);
+                println!("ATSPI_UNAVAILABLE {}", reason);
+                None
+            }
+        };
+
+        let target_path = if let Some(path) = live_selection {
+            path
+        } else {
+            let mem_selection = self.current_selection.clone();
+            let persisted = crate::state::load_last_selection();
+            match (mem_selection.as_deref(), persisted.as_deref()) {
+                (Some(mem_path), _) if mem_path.exists() => {
+                    println!("SELECTION_FALLBACK memory");
+                    mem_path.to_path_buf()
+                }
+                (_, Some(pers_path)) if pers_path.exists() => {
+                    println!("SELECTION_FALLBACK persisted");
+                    pers_path.to_path_buf()
+                }
+                (Some(stale), _) => {
+                    println!("SELECTION_FALLBACK none");
+                    self.current_selection = None;
+                    return Err(format!(
+                        "last previewed file no longer exists: {}",
+                        stale.display()
+                    ));
+                }
+                (_, Some(stale)) => {
+                    println!("SELECTION_FALLBACK none");
+                    self.current_selection = None;
+                    return Err(format!(
+                        "last previewed file no longer exists: {}",
+                        stale.display()
+                    ));
+                }
+                (None, None) => {
+                    println!("SELECTION_FALLBACK none");
+                    return Err("no file to preview".to_string());
+                }
+            }
+        };
+
+        println!("TOGGLE_OPENED");
+        self.show_file(&target_path, toggle_start)?;
+        println!("TOGGLE_MS {}", toggle_start.elapsed().as_millis());
+        Ok(())
     }
 }
 
