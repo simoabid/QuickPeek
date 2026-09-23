@@ -6,7 +6,7 @@ use gtk4::glib;
 use gtk4::prelude::*;
 use std::cell::RefCell;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Instant;
 
@@ -19,18 +19,14 @@ fn main() {
     let start_time = Instant::now();
 
     let args: Vec<String> = env::args().collect();
-    if args.len() < 2 {
-        eprintln!("Error: missing image path argument");
-        std::process::exit(1);
-    }
-    if args.len() > 2 {
-        eprintln!("Error: too many arguments: exactly one image path argument is required");
-        std::process::exit(1);
-    }
-
-    let raw_path = Path::new(&args[1]);
     let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-    let abs_path = dbus::absolutize_path(raw_path, &current_dir);
+    let cli_mode = match window::parse_cli_args_with_dir(&args, &current_dir) {
+        Ok(m) => m,
+        Err(err) => {
+            eprintln!("Error: {}", err);
+            std::process::exit(1);
+        }
+    };
 
     // Connect to session D-Bus
     let conn = match gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
@@ -55,6 +51,21 @@ fn main() {
                 let mut ctx_borrow = ctx_clone.borrow_mut();
                 if let Some(ctx) = ctx_borrow.as_mut() {
                     match ctx.wm.show_file(&path, show_start) {
+                        Ok(()) => {
+                            invocation.return_value(Some(&(true, "").to_variant()));
+                        }
+                        Err(err) => {
+                            invocation.return_value(Some(&(false, err.as_str()).to_variant()));
+                        }
+                    }
+                } else {
+                    invocation.return_value(Some(&(false, "daemon not ready").to_variant()));
+                }
+            }
+            "Toggle" => {
+                let mut ctx_borrow = ctx_clone.borrow_mut();
+                if let Some(ctx) = ctx_borrow.as_mut() {
+                    match ctx.wm.toggle() {
                         Ok(()) => {
                             invocation.return_value(Some(&(true, "").to_variant()));
                         }
@@ -106,19 +117,39 @@ fn main() {
 
     match role {
         dbus::Role::Client => {
-            println!("ROLE CLIENT");
-            match dbus::call_show_file(&conn, &abs_path, 2000) {
-                Ok((true, _)) => {
-                    println!("CALL_MS {}", start_time.elapsed().as_millis());
-                    std::process::exit(0);
+            match cli_mode {
+                window::CliMode::Toggle => {
+                    match dbus::call_toggle(&conn, 2000) {
+                        Ok((true, _)) => {
+                            // On success print NOTHING
+                            std::process::exit(0);
+                        }
+                        Ok((false, msg)) => {
+                            eprintln!("Error: {}", msg);
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            eprintln!("Error: D-Bus call failed: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
                 }
-                Ok((false, msg)) => {
-                    eprintln!("Error: {}", msg);
-                    std::process::exit(1);
-                }
-                Err(err) => {
-                    eprintln!("Error: D-Bus call failed: {}", err);
-                    std::process::exit(1);
+                window::CliMode::Show(abs_path) => {
+                    println!("ROLE CLIENT");
+                    match dbus::call_show_file(&conn, &abs_path, 2000) {
+                        Ok((true, _)) => {
+                            println!("CALL_MS {}", start_time.elapsed().as_millis());
+                            std::process::exit(0);
+                        }
+                        Ok((false, msg)) => {
+                            eprintln!("Error: {}", msg);
+                            std::process::exit(1);
+                        }
+                        Err(err) => {
+                            eprintln!("Error: D-Bus call failed: {}", err);
+                            std::process::exit(1);
+                        }
+                    }
                 }
             }
         }
@@ -139,16 +170,17 @@ fn main() {
             };
             *daemon_ctx.borrow_mut() = Some(context);
 
-            let initial_show = daemon_ctx
-                .borrow_mut()
-                .as_mut()
-                .unwrap()
-                .wm
-                .show_file(&abs_path, start_time);
+            if let window::CliMode::Show(ref path) = cli_mode {
+                let initial_show = daemon_ctx
+                    .borrow_mut()
+                    .as_mut()
+                    .unwrap()
+                    .wm
+                    .show_file(path, start_time);
 
-            if let Err(err) = initial_show {
-                eprintln!("Error: {}", err);
-                std::process::exit(1);
+                if let Err(err) = initial_show {
+                    eprintln!("Error: {}", err);
+                }
             }
 
             main_loop.run();

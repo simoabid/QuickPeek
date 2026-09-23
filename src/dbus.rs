@@ -14,6 +14,10 @@ pub const INTROSPECTION_XML: &str = r#"<node>
       <arg name="ok" type="b" direction="out"/>
       <arg name="message" type="s" direction="out"/>
     </method>
+    <method name="Toggle">
+      <arg name="ok" type="b" direction="out"/>
+      <arg name="message" type="s" direction="out"/>
+    </method>
     <method name="Quit"/>
   </interface>
 </node>"#;
@@ -71,6 +75,26 @@ pub fn call_show_file(
         INTERFACE_NAME,
         "ShowFile",
         Some(&params),
+        None,
+        gio::DBusCallFlags::NONE,
+        timeout_ms,
+        gio::Cancellable::NONE,
+    )?;
+    let ok: bool = reply.child_get(0);
+    let msg: String = reply.child_get(1);
+    Ok((ok, msg))
+}
+
+pub fn call_toggle(
+    conn: &gio::DBusConnection,
+    timeout_ms: i32,
+) -> Result<(bool, String), glib::Error> {
+    let reply = conn.call_sync(
+        Some(BUS_NAME),
+        OBJECT_PATH,
+        INTERFACE_NAME,
+        "Toggle",
+        None,
         None,
         gio::DBusCallFlags::NONE,
         timeout_ms,
@@ -141,3 +165,4 @@ mod tests {
         );
     }
 }
+
