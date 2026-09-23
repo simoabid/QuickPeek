@@ -168,3 +168,83 @@ fn main() {
 
     std::process::exit(0);
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_cli_missing_args() {
+        let args = vec!["quickpeek".to_string()];
+        let res = validate_cli_path(&args);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("missing image path argument"));
+    }
+
+    #[test]
+    fn test_cli_too_many_args() {
+        let args = vec![
+            "quickpeek".to_string(),
+            "tests/fixtures/sample.png".to_string(),
+            "extra_arg".to_string(),
+        ];
+        let res = validate_cli_path(&args);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("too many arguments"));
+    }
+
+    #[test]
+    fn test_cli_nonexistent_file() {
+        let args = vec![
+            "quickpeek".to_string(),
+            "nonexistent_image_file_98765.png".to_string(),
+        ];
+        let res = validate_cli_path(&args);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("file not found"));
+    }
+
+    #[test]
+    fn test_cli_unsupported_format() {
+        let args = vec![
+            "quickpeek".to_string(),
+            "Cargo.toml".to_string(),
+        ];
+        let res = validate_cli_path(&args);
+        assert!(res.is_err());
+        assert!(res.unwrap_err().contains("unsupported format"));
+    }
+
+    #[test]
+    fn test_cli_valid_sample_png() {
+        let args = vec![
+            "quickpeek".to_string(),
+            "tests/fixtures/sample.png".to_string(),
+        ];
+        let res = validate_cli_path(&args);
+        assert!(res.is_ok());
+        let path = res.unwrap();
+        assert_eq!(path, PathBuf::from("tests/fixtures/sample.png"));
+    }
+
+    #[test]
+    fn test_aspect_fit_4000x3000_downscaled() {
+        // 4000x3000 image on 1920x1080@60% -> 864x648
+        let (w, h) = calculate_aspect_fit(4000, 3000, 1920, 1080, 0.60);
+        assert_eq!((w, h), (864, 648));
+    }
+
+    #[test]
+    fn test_aspect_fit_64x64_never_upscale() {
+        // 64x64 image on 1920x1080 -> stays 64x64 (never upscale)
+        let (w, h) = calculate_aspect_fit(64, 64, 1920, 1080, 0.60);
+        assert_eq!((w, h), (64, 64));
+    }
+
+    #[test]
+    fn test_aspect_fit_500x2000_tall() {
+        // 500x2000 image on 1920x1080@60% -> 162x648
+        let (w, h) = calculate_aspect_fit(500, 2000, 1920, 1080, 0.60);
+        assert_eq!((w, h), (162, 648));
+    }
+}
