@@ -20,17 +20,42 @@ This document is the authoritative tracking ledger for the QuickPeek implementat
 | :---: | :--- | :---: |
 | **0** | **Reconnaissance & Environment Verification** | **COMPLETE** |
 | **1** | **Skeleton — Single Image Preview Window** | **COMPLETE** |
-| 2 | AT-SPI Selection Extraction (Nautilus & Dolphin) | PLANNED |
+| **2** | **D-Bus Single-Instance Daemon (`org.quickpeek.QuickPeek`)** | **IN PROGRESS** |
 | 3 | Image Formats Expansion: WebP, SVG, Animated GIF | PLANNED |
-| 4 | Single-Instance D-Bus Service (`org.quickpeek.QuickPeek`) | PLANNED |
-| 5 | Compositor Integration & Keybindings (Hyprland & Niri) | PLANNED |
-| 6 | Keyboard Navigation (Arrows to cycle selection, Esc to dismiss) | PLANNED |
-| 7 | Window Placement & Compositor Rules (Floating, Centering) | PLANNED |
-| 8 | Core Preview Container & Header/Controls | PLANNED |
-| 9 | Fallback & Error Handling (Unsupported formats, missing files) | PLANNED |
-| 10 | Performance Tuning & Latency Benchmark Hardening | PLANNED |
-| 11 | Packaging & Deployment (PKGBUILD, AUR, systemd user service) | PLANNED |
+| 4 | AT-SPI Selection Extraction (Dolphin) | PLANNED |
+| 5 | AT-SPI Selection Extraction (Nautilus) | PLANNED |
+| 6 | Compositor Integration & Keybindings (Hyprland & Niri) | PLANNED |
+| 7 | Daemon Packaging & systemd User Service | PLANNED |
+| 8 | Keyboard Navigation (Arrows to cycle selection, Esc to dismiss) | PLANNED |
+| 9 | Window Placement & Compositor Rules (Floating, Centering) | PLANNED |
+| 10 | Fallback & Error Handling (Unsupported formats, missing files) | PLANNED |
+| 11 | Performance Tuning & Latency Benchmark Hardening | PLANNED |
 | 12 | Final QA, Regression Suite & Documentation Wrap-up | PLANNED |
+
+---
+
+## Phase 2 API Facts
+Verified against pinned dependencies (`gtk4 0.11.5`, `gio 0.22.10`, `glib 0.22.10`):
+1. **Re-exports**:
+   `gtk4/src/lib.rs:12-13`: `pub use gio; pub use glib;`
+2. **Session Bus Connection**:
+   `gio::bus_get_sync(bus_type: BusType, cancellable: Option<&impl IsA<Cancellable>>) -> Result<DBusConnection, glib::Error>`
+3. **Synchronous D-Bus Calls (`RequestName` and client `ShowFile`)**:
+   `DBusConnection::call_sync(&self, bus_name: Option<&str>, object_path: &str, interface_name: &str, method_name: &str, parameters: Option<&glib::Variant>, reply_type: Option<&glib::VariantTy>, flags: DBusCallFlags, timeout_msec: i32, cancellable: Option<&impl IsA<Cancellable>>) -> Result<glib::Variant, glib::Error>`
+4. **Introspection & Interface Lookup**:
+   `DBusNodeInfo::for_xml(xml_data: &str) -> Result<DBusNodeInfo, glib::Error>`
+   `DBusNodeInfo::lookup_interface(&self, name: &str) -> Option<DBusInterfaceInfo>`
+5. **D-Bus Object Registration**:
+   `DBusConnection::register_object<'a>(&'a self, object_path: &'a str, interface_info: &'a DBusInterfaceInfo) -> RegistrationBuilder<'a>`
+   `RegistrationBuilder::method_call(mut self, f: F) -> Self` where `F: Fn(DBusConnection, Option<&str>, &str, Option<&str>, &str, glib::Variant, DBusMethodInvocation) + 'static`
+   `RegistrationBuilder::build(self) -> Result<RegistrationId, glib::Error>`
+6. **Method Invocation Responses**:
+   `DBusMethodInvocation::return_value(self, parameters: Option<&glib::Variant>)`
+   `DBusMethodInvocation::return_dbus_error(self, error_name: &str, error_message: &str)`
+7. **Tooling Verification**:
+   - `/usr/bin/dbus-run-session` (present)
+   - `/usr/bin/gdbus` (present)
+   - `/usr/bin/busctl` (present)
 
 ---
 
