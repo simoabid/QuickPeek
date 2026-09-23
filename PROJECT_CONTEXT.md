@@ -155,6 +155,17 @@ All architecture items below are marked **PLANNED (evidence pending)**:
 - **Git Branch**: `main` as the default development and production branch.
 - **Conventional Commits**: All commit messages adhere strictly to `feat:`, `fix:`, `docs:`, `chore:`, `test:`, or `refactor:`.
 - **Evidence or it Didn't Happen**: Every technical decision, bug claim, or verification must be substantiated with exact terminal commands, exit codes, and verbatim outputs.
+- **REPORTS Convention (Permanent)**: Create gitignored `REPORTS/` (listed in `.gitignore`); every phase's final report is written as `REPORTS/PHASE_X_REPORT.md` AND pasted in full in chat reply.
+
+## Crate Layout
+- **Root Product Crate (`quickpeek`)**:
+  - `Cargo.toml`: defines root `quickpeek` binary crate with `gtk4 = "0.11"` dependency.
+  - `Cargo.lock`: pinned and committed dependencies.
+  - `.cargo/config.toml`: repo-level target linker fix (`[target.x86_64-unknown-linux-gnu] linker = "gcc"`).
+  - `src/main.rs`: product entrypoint, CLI validation, aspect-fit sizing math, GTK4 undecorated window display, and cold-start proxy measurement.
+  - `tests/fixtures/sample.png`: 64x64 RGBA test image fixture.
+- **Probe Crate (`probe/`)**:
+  - Gitignored throwaway instrumentation crate for toolchain verification and asset generation.
 
 ## Integration Points
 - **Hyprland Binds + `hyprctl`**: Global shortcut `bind = , space, exec, quickpeek --toggle` and active window inspection via `hyprctl activewindow -j`.
