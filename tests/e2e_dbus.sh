@@ -6,6 +6,8 @@ cd "$REPO_ROOT"
 
 DAEMON_LOG="$(mktemp /tmp/qp_daemon_XXXXXX.log)"
 CLIENT_ERR="$(mktemp /tmp/qp_client_err_XXXXXX.log)"
+TEST_STATE_DIR="$(mktemp -d /tmp/qp_state_XXXXXX)"
+export XDG_STATE_HOME="$TEST_STATE_DIR"
 
 cleanup() {
     if [ -n "${DAEMON_PID:-}" ] && kill -0 "$DAEMON_PID" 2>/dev/null; then
@@ -13,8 +15,20 @@ cleanup() {
         kill -9 "$DAEMON_PID" 2>/dev/null || true
     fi
     rm -f "$DAEMON_LOG" "$CLIENT_ERR"
+    rm -rf "$TEST_STATE_DIR"
 }
 trap cleanup EXIT INT TERM
+
+wait_for_name_released() {
+    for i in {1..30}; do
+        if ! gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner org.quickpeek.QuickPeek >/dev/null 2>&1; then
+            return 0
+        fi
+        sleep 0.05
+    done
+    echo "ERROR: Name org.quickpeek.QuickPeek still owned after quit"
+    return 1
+}
 
 echo "=== 1. Private D-Bus Session Address ==="
 echo "DBUS_SESSION_BUS_ADDRESS=$DBUS_SESSION_BUS_ADDRESS"
@@ -184,7 +198,9 @@ dbus-run-session bash -c "
 set -euo pipefail
 INNER_LOG=\$(mktemp /tmp/qp_inner_XXXXXX.log)
 INNER_ERR=\$(mktemp /tmp/qp_inner_err_XXXXXX.log)
-trap 'kill -9 \"\$INNER_PID\" 2>/dev/null || true; rm -f \"\$INNER_LOG\" \"\$INNER_ERR\"' EXIT
+INNER_STATE_DIR=\$(mktemp -d /tmp/qp_inner_state_XXXXXX)
+export XDG_STATE_HOME=\"\$INNER_STATE_DIR\"
+trap 'kill -9 \"\$INNER_PID\" 2>/dev/null || true; rm -f \"\$INNER_LOG\" \"\$INNER_ERR\"; rm -rf \"\$INNER_STATE_DIR\"' EXIT
 
 # Cold-start daemon with nonexistent path
 '$REPO_ROOT/target/release/quickpeek' '/nonexistent/path/does_not_exist_xyz.png' > \"\$INNER_LOG\" 2> \"\$INNER_ERR\" &
@@ -300,4 +316,184 @@ echo "$FINAL_INTROSPECT" | grep -q "Quit"
 # Clean shutdown
 gdbus call --session --dest org.quickpeek.QuickPeek --object-path /org/quickpeek/QuickPeek --method org.quickpeek.QuickPeek.Quit
 wait "$DAEMON_PID" || true
-echo "=== ALL 12 E2E D-BUS CHECKS PASSED ==="
+wait_for_name_released
+echo "Check 12 passed: introspection verified."
+
+echo "=== 13. Persistence Round-Trip ==="
+> "$DAEMON_LOG"
+"$REPO_ROOT/target/release/quickpeek" "$REPO_ROOT/tests/fixtures/sample.png" > "$DAEMON_LOG" 2>&1 &
+DAEMON_PID=$!
+
+for i in {1..50}; do
+    if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner org.quickpeek.QuickPeek >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+for i in {1..30}; do
+    if grep -q "WINDOW_OPENED" "$DAEMON_LOG" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+grep -q "WINDOW_OPENED" "$DAEMON_LOG"
+
+STATE_FILE="$XDG_STATE_HOME/quickpeek/last_selection"
+if [ ! -f "$STATE_FILE" ]; then
+    echo "ERROR: State file $STATE_FILE was not created"
+    exit 1
+fi
+grep -q "tests/fixtures/sample.png" "$STATE_FILE"
+
+# No-args toggle close (TOGGLE_CLOSED)
+OUT_CLOSE=$("$REPO_ROOT/target/release/quickpeek")
+if [ -n "$OUT_CLOSE" ]; then
+    echo "ERROR: Expected empty stdout from toggle close, got: $OUT_CLOSE"
+    exit 1
+fi
+for i in {1..30}; do
+    if grep -q "TOGGLE_CLOSED" "$DAEMON_LOG" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+grep -q "TOGGLE_CLOSED" "$DAEMON_LOG"
+
+# Clean Quit
+gdbus call --session --dest org.quickpeek.QuickPeek --object-path /org/quickpeek/QuickPeek --method org.quickpeek.QuickPeek.Quit
+wait "$DAEMON_PID" || true
+wait_for_name_released
+
+# Cold BARE start (no args, bus name free) -> opens persisted selection
+> "$DAEMON_LOG"
+"$REPO_ROOT/target/release/quickpeek" > "$DAEMON_LOG" 2>&1 &
+DAEMON_PID=$!
+
+for i in {1..50}; do
+    if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner org.quickpeek.QuickPeek >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+for i in {1..30}; do
+    if grep -q "WINDOW_OPENED" "$DAEMON_LOG" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+grep -q "SELECTION_RESTORED" "$DAEMON_LOG"
+grep -q "WINDOW_OPENED" "$DAEMON_LOG"
+grep -q "WARM_MS" "$DAEMON_LOG"
+
+# Clean Quit
+gdbus call --session --dest org.quickpeek.QuickPeek --object-path /org/quickpeek/QuickPeek --method org.quickpeek.QuickPeek.Quit
+wait "$DAEMON_PID" || true
+wait_for_name_released
+echo "Check 13 passed: persistence round-trip verified."
+
+echo "=== 14. Service Mode Autostart (--service) ==="
+# Cold --service start -> ROLE DAEMON and NO WINDOW_OPENED within 2 s
+> "$DAEMON_LOG"
+"$REPO_ROOT/target/release/quickpeek" --service > "$DAEMON_LOG" 2>&1 &
+DAEMON_PID=$!
+
+for i in {1..50}; do
+    if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner org.quickpeek.QuickPeek >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+grep -q "ROLE DAEMON" "$DAEMON_LOG"
+grep -q "SELECTION_RESTORED" "$DAEMON_LOG"
+
+sleep 2
+if grep -q "WINDOW_OPENED" "$DAEMON_LOG" 2>/dev/null; then
+    echo "ERROR: Service mode opened a window within 2s"
+    exit 1
+fi
+
+# Second --service call while daemon running -> exit 0 silent
+SERVICE_OUT=$("$REPO_ROOT/target/release/quickpeek" --service)
+if [ -n "$SERVICE_OUT" ]; then
+    echo "ERROR: Expected silent stdout from --service client, got: $SERVICE_OUT"
+    exit 1
+fi
+
+# Then no-args client -> TOGGLE_OPENED + WINDOW_OPENED (from persisted selection)
+TOGGLE_OUT=$("$REPO_ROOT/target/release/quickpeek")
+if [ -n "$TOGGLE_OUT" ]; then
+    echo "ERROR: Expected empty stdout from toggle client, got: $TOGGLE_OUT"
+    exit 1
+fi
+
+for i in {1..30}; do
+    if grep -q "WINDOW_OPENED" "$DAEMON_LOG" 2>/dev/null; then
+        break
+    fi
+    sleep 0.1
+done
+
+grep -q "TOGGLE_OPENED" "$DAEMON_LOG"
+grep -q "WINDOW_OPENED" "$DAEMON_LOG"
+grep -q "WARM_MS" "$DAEMON_LOG"
+
+# Clean Quit
+gdbus call --session --dest org.quickpeek.QuickPeek --object-path /org/quickpeek/QuickPeek --method org.quickpeek.QuickPeek.Quit
+wait "$DAEMON_PID" || true
+wait_for_name_released
+echo "Check 14 passed: service mode verified."
+
+echo "=== 15. Stale Selection Handling ==="
+BOGUS_PATH="/nonexistent/bogus_sample_xyz_123.png"
+echo "$BOGUS_PATH" > "$XDG_STATE_HOME/quickpeek/last_selection"
+
+> "$DAEMON_LOG"
+DAEMON_ERR="$(mktemp /tmp/qp_daemon_err_XXXXXX.log)"
+"$REPO_ROOT/target/release/quickpeek" > "$DAEMON_LOG" 2> "$DAEMON_ERR" &
+DAEMON_PID=$!
+
+for i in {1..50}; do
+    if gdbus call --session --dest org.freedesktop.DBus --object-path /org/freedesktop/DBus --method org.freedesktop.DBus.GetNameOwner org.quickpeek.QuickPeek >/dev/null 2>&1; then
+        break
+    fi
+    sleep 0.1
+done
+
+sleep 0.5
+
+# Daemon must be running
+if ! kill -0 "$DAEMON_PID" 2>/dev/null; then
+    echo "ERROR: Daemon died on stale selection"
+    cat "$DAEMON_ERR"
+    exit 1
+fi
+
+grep -q "ROLE DAEMON" "$DAEMON_LOG"
+grep -q "SELECTION_RESTORED" "$DAEMON_LOG"
+
+if grep -q "WINDOW_OPENED" "$DAEMON_LOG" 2>/dev/null; then
+    echo "ERROR: Window opened on stale selection"
+    exit 1
+fi
+
+grep -q "Error:" "$DAEMON_ERR"
+grep -q "last previewed file no longer exists" "$DAEMON_ERR"
+
+# Clean Quit
+gdbus call --session --dest org.quickpeek.QuickPeek --object-path /org/quickpeek/QuickPeek --method org.quickpeek.QuickPeek.Quit
+wait "$DAEMON_PID" || true
+wait_for_name_released
+rm -f "$DAEMON_ERR"
+echo "Check 15 passed: stale selection handling verified."
+
+# Verify sandboxed state file was used
+if [ ! -f "$TEST_STATE_DIR/quickpeek/last_selection" ]; then
+    echo "ERROR: Sandboxed state file not created"
+    exit 1
+fi
+
+echo "=== ALL 15 E2E D-BUS CHECKS PASSED ==="
