@@ -1,4 +1,5 @@
 mod dbus;
+mod state;
 mod window;
 
 use gtk4::gio;
@@ -118,6 +119,10 @@ fn main() {
     match role {
         dbus::Role::Client => {
             match cli_mode {
+                window::CliMode::Service => {
+                    // quickpeek --service when daemon running: exit 0 silently (idempotent)
+                    std::process::exit(0);
+                }
                 window::CliMode::Toggle => {
                     match dbus::call_toggle(&conn, 2000) {
                         Ok((true, _)) => {
@@ -156,12 +161,20 @@ fn main() {
         dbus::Role::Daemon => {
             println!("ROLE DAEMON");
 
+            let persisted_selection = state::load_last_selection();
+            if let Some(ref path) = persisted_selection {
+                println!("SELECTION_RESTORED {}", path.display());
+            } else {
+                println!("SELECTION_NONE");
+            }
+
             if let Err(err) = gtk4::init() {
                 eprintln!("Error: failed to initialize GTK4: {}", err);
                 std::process::exit(1);
             }
 
-            let wm = window::WindowManager::new();
+            let mut wm = window::WindowManager::new();
+            wm.set_selection(persisted_selection.clone());
             let main_loop = glib::MainLoop::new(None, false);
 
             let context = DaemonContext {
@@ -170,16 +183,47 @@ fn main() {
             };
             *daemon_ctx.borrow_mut() = Some(context);
 
-            if let window::CliMode::Show(ref path) = cli_mode {
-                let initial_show = daemon_ctx
-                    .borrow_mut()
-                    .as_mut()
-                    .unwrap()
-                    .wm
-                    .show_file(path, start_time);
-
-                if let Err(err) = initial_show {
-                    eprintln!("Error: {}", err);
+            match cli_mode {
+                window::CliMode::Service => {
+                    // pure service mode: never opens a window
+                }
+                window::CliMode::Toggle => {
+                    // Cold-toggle semantics: bare no-args invocation with bus name FREE
+                    // starts the daemon AND opens the persisted selection immediately.
+                    // If no persisted selection exists: silent service-mode start.
+                    match window::check_selection_path(persisted_selection.as_deref()) {
+                        window::SelectionCheck::Valid(ref path) => {
+                            let mut ctx_borrow = daemon_ctx.borrow_mut();
+                            if let Some(ctx) = ctx_borrow.as_mut() {
+                                let initial_show = ctx.wm.show_file(path, start_time);
+                                if let Err(err) = initial_show {
+                                    eprintln!("Error: {}", err);
+                                }
+                            }
+                        }
+                        window::SelectionCheck::Stale(ref path) => {
+                            let mut ctx_borrow = daemon_ctx.borrow_mut();
+                            if let Some(ctx) = ctx_borrow.as_mut() {
+                                ctx.wm.set_selection(None);
+                            }
+                            eprintln!(
+                                "Error: last previewed file no longer exists: {}",
+                                path.display()
+                            );
+                        }
+                        window::SelectionCheck::None => {
+                            // Silent start (service mode, no window)
+                        }
+                    }
+                }
+                window::CliMode::Show(ref path) => {
+                    let mut ctx_borrow = daemon_ctx.borrow_mut();
+                    if let Some(ctx) = ctx_borrow.as_mut() {
+                        let initial_show = ctx.wm.show_file(path, start_time);
+                        if let Err(err) = initial_show {
+                            eprintln!("Error: {}", err);
+                        }
+                    }
                 }
             }
 

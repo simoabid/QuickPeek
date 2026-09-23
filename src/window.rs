@@ -7,9 +7,10 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Instant;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum CliMode {
     Toggle,
+    Service,
     Show(PathBuf),
 }
 
@@ -17,11 +18,35 @@ pub fn parse_cli_args_with_dir(args: &[String], current_dir: &Path) -> Result<Cl
     if args.len() < 2 {
         Ok(CliMode::Toggle)
     } else if args.len() == 2 {
-        let raw_path = Path::new(&args[1]);
-        let abs_path = crate::dbus::absolutize_path(raw_path, current_dir);
-        Ok(CliMode::Show(abs_path))
+        if args[1] == "--service" {
+            Ok(CliMode::Service)
+        } else {
+            let raw_path = Path::new(&args[1]);
+            let abs_path = crate::dbus::absolutize_path(raw_path, current_dir);
+            Ok(CliMode::Show(abs_path))
+        }
     } else {
-        Err("too many arguments: at most one image path argument is allowed".to_string())
+        Err("too many arguments: at most one argument is allowed".to_string())
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SelectionCheck {
+    Valid(PathBuf),
+    Stale(PathBuf),
+    None,
+}
+
+pub fn check_selection_path(selection: Option<&Path>) -> SelectionCheck {
+    match selection {
+        Some(path) => {
+            if path.exists() && path.is_file() {
+                SelectionCheck::Valid(path.to_path_buf())
+            } else {
+                SelectionCheck::Stale(path.to_path_buf())
+            }
+        }
+        None => SelectionCheck::None,
     }
 }
 
@@ -74,6 +99,7 @@ pub struct WindowManager {
     picture: Option<gtk4::Picture>,
     is_open: Rc<Cell<bool>>,
     current_selection: Option<PathBuf>,
+    last_open_time: Option<Instant>,
 }
 
 impl WindowManager {
@@ -94,6 +120,7 @@ impl WindowManager {
             picture: None,
             is_open: Rc::new(Cell::new(false)),
             current_selection: None,
+            last_open_time: None,
         }
     }
 
@@ -105,6 +132,10 @@ impl WindowManager {
     #[allow(dead_code)]
     pub fn current_selection(&self) -> Option<&PathBuf> {
         self.current_selection.as_ref()
+    }
+
+    pub fn set_selection(&mut self, selection: Option<PathBuf>) {
+        self.current_selection = selection;
     }
 
     pub fn show_file(
@@ -150,6 +181,8 @@ impl WindowManager {
                 win.present();
 
                 self.current_selection = Some(path.to_path_buf());
+                let _ = crate::state::save_last_selection(path);
+                self.last_open_time = Some(Instant::now());
                 println!("IMAGE_SWAPPED");
                 println!("WARM_MS {}", show_start.elapsed().as_millis());
                 return Ok(());
@@ -201,6 +234,8 @@ impl WindowManager {
         window.present();
 
         self.current_selection = Some(path.to_path_buf());
+        let _ = crate::state::save_last_selection(path);
+        self.last_open_time = Some(Instant::now());
         println!("WINDOW_OPENED");
         println!("WARM_MS {}", show_start.elapsed().as_millis());
 
@@ -213,6 +248,7 @@ impl WindowManager {
     pub fn close_window(&mut self) {
         if let Some(win) = self.window.take() {
             self.picture = None;
+            self.last_open_time = None;
             if self.is_open.get() {
                 self.is_open.set(false);
                 win.close();
@@ -224,6 +260,12 @@ impl WindowManager {
     pub fn toggle(&mut self) -> Result<(), String> {
         match decide_toggle_action(self.is_open.get(), self.current_selection.is_some()) {
             ToggleAction::Close => {
+                if let Some(open_time) = self.last_open_time {
+                    if open_time.elapsed() <= std::time::Duration::from_millis(120) {
+                        // Debounce: ignore rapid toggle close right after opening
+                        return Ok(());
+                    }
+                }
                 let toggle_start = Instant::now();
                 self.close_window();
                 println!("TOGGLE_CLOSED");
@@ -231,12 +273,22 @@ impl WindowManager {
                 Ok(())
             }
             ToggleAction::Open => {
-                let path = self.current_selection.clone().unwrap();
-                let toggle_start = Instant::now();
-                println!("TOGGLE_OPENED");
-                self.show_file(&path, toggle_start)?;
-                println!("TOGGLE_MS {}", toggle_start.elapsed().as_millis());
-                Ok(())
+                match check_selection_path(self.current_selection.as_deref()) {
+                    SelectionCheck::Valid(path) => {
+                        let toggle_start = Instant::now();
+                        println!("TOGGLE_OPENED");
+                        self.show_file(&path, toggle_start)?;
+                        println!("TOGGLE_MS {}", toggle_start.elapsed().as_millis());
+                        Ok(())
+                    }
+                    SelectionCheck::Stale(path) => {
+                        self.current_selection = None;
+                        Err(format!("last previewed file no longer exists: {}", path.display()))
+                    }
+                    SelectionCheck::None => {
+                        Err("no file to preview".to_string())
+                    }
+                }
             }
             ToggleAction::NoSelection => {
                 Err("no file to preview".to_string())
@@ -333,6 +385,37 @@ mod tests {
         // 500x2000 image on 1920x1080@60% -> 162x648
         let (w, h) = calculate_aspect_fit(500, 2000, 1920, 1080, 0.60);
         assert_eq!((w, h), (162, 648));
+    }
+
+    #[test]
+    fn test_cli_dispatch_service() {
+        let args = vec!["quickpeek".to_string(), "--service".to_string()];
+        let res = parse_cli_args_with_dir(&args, Path::new("/base"));
+        assert_eq!(res, Ok(CliMode::Service));
+    }
+
+    #[test]
+    fn test_check_selection_path_valid_stale_none() {
+        let tmp = std::env::temp_dir().join(format!("qp_sel_test_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        std::fs::create_dir_all(&tmp).unwrap();
+
+        let valid_file = tmp.join("valid.png");
+        std::fs::write(&valid_file, b"png data").unwrap();
+
+        let stale_file = tmp.join("nonexistent_stale.png");
+
+        assert_eq!(
+            check_selection_path(Some(&valid_file)),
+            SelectionCheck::Valid(valid_file.clone())
+        );
+        assert_eq!(
+            check_selection_path(Some(&stale_file)),
+            SelectionCheck::Stale(stale_file.clone())
+        );
+        assert_eq!(check_selection_path(None), SelectionCheck::None);
+
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
 
