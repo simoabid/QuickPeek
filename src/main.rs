@@ -1,250 +1,164 @@
-use gtk4::gdk;
+mod dbus;
+mod window;
+
 use gtk4::gio;
 use gtk4::glib;
 use gtk4::prelude::*;
+use std::cell::RefCell;
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::rc::Rc;
 use std::time::Instant;
 
-pub fn validate_cli_path(args: &[String]) -> Result<PathBuf, String> {
-    if args.len() < 2 {
-        return Err("missing image path argument".to_string());
-    }
-    if args.len() > 2 {
-        return Err("too many arguments: exactly one image path argument is required".to_string());
-    }
-
-    let path_str = &args[1];
-    let path = PathBuf::from(path_str);
-
-    if !path.exists() {
-        return Err(format!("file not found: {}", path_str));
-    }
-
-    if !path.is_file() {
-        return Err(format!("path is not a file: {}", path_str));
-    }
-
-    // Phase 1 formats: PNG and JPEG only
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .map(|s| s.to_ascii_lowercase())
-        .unwrap_or_default();
-
-    match ext.as_str() {
-        "png" | "jpg" | "jpeg" => Ok(path),
-        _ => Err(format!(
-            "unsupported format '{}': Phase 1 supports PNG and JPEG only",
-            ext
-        )),
-    }
-}
-
-pub fn calculate_aspect_fit(
-    img_w: i32,
-    img_h: i32,
-    monitor_w: i32,
-    monitor_h: i32,
-    cap_fraction: f64,
-) -> (i32, i32) {
-    if img_w <= 0 || img_h <= 0 || monitor_w <= 0 || monitor_h <= 0 {
-        return (img_w.max(1), img_h.max(1));
-    }
-
-    let max_w = (monitor_w as f64) * cap_fraction;
-    let max_h = (monitor_h as f64) * cap_fraction;
-
-    let scale_w = max_w / (img_w as f64);
-    let scale_h = max_h / (img_h as f64);
-
-    // Downscaled only if it exceeds aspect-fit cap; NEVER upscale
-    let scale = scale_w.min(scale_h).min(1.0);
-
-    let target_w = (img_w as f64 * scale).round() as i32;
-    let target_h = (img_h as f64 * scale).round() as i32;
-
-    (target_w, target_h)
+struct DaemonContext {
+    wm: window::WindowManager,
+    main_loop: glib::MainLoop,
 }
 
 fn main() {
     let start_time = Instant::now();
 
     let args: Vec<String> = env::args().collect();
-    let image_path = match validate_cli_path(&args) {
-        Ok(path) => path,
-        Err(err) => {
-            eprintln!("Error: {}", err);
-            std::process::exit(1);
-        }
-    };
-
-    if let Err(err) = gtk4::init() {
-        eprintln!("Error: failed to initialize GTK4: {}", err);
+    if args.len() < 2 {
+        eprintln!("Error: missing image path argument");
+        std::process::exit(1);
+    }
+    if args.len() > 2 {
+        eprintln!("Error: too many arguments: exactly one image path argument is required");
         std::process::exit(1);
     }
 
-    // Load image texture
-    let gio_file = gio::File::for_path(&image_path);
-    let texture = match gdk::Texture::from_file(&gio_file) {
-        Ok(t) => t,
+    let raw_path = Path::new(&args[1]);
+    let current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    let abs_path = dbus::absolutize_path(raw_path, &current_dir);
+
+    // Connect to session D-Bus
+    let conn = match gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
+        Ok(c) => c,
         Err(err) => {
-            eprintln!("Error: failed to load image '{}': {}", image_path.display(), err);
+            eprintln!("Error: failed to connect to D-Bus session: {}", err);
             std::process::exit(1);
         }
     };
 
-    let img_w = texture.width();
-    let img_h = texture.height();
+    // Race-free ordering: register the D-Bus object BEFORE acquiring the name
+    let daemon_ctx: Rc<RefCell<Option<DaemonContext>>> = Rc::new(RefCell::new(None));
+    let ctx_clone = daemon_ctx.clone();
 
-    // Query monitor geometry
-    let display = gdk::Display::default().expect("no display connection");
-    let (monitor_w, monitor_h) = display
-        .monitors()
-        .item(0)
-        .and_downcast::<gdk::Monitor>()
-        .map(|m| {
-            let geom = m.geometry();
-            (geom.width(), geom.height())
-        })
-        .unwrap_or((1920, 1080));
+    let _reg_id = match dbus::register_server(&conn, move |method, params, invocation| {
+        match method {
+            "ShowFile" => {
+                let path_str = params.child_get::<String>(0);
+                let path = PathBuf::from(path_str);
+                let show_start = Instant::now();
 
-    // Calculate aspect fit size (60% cap, never upscale)
-    let (target_w, target_h) = calculate_aspect_fit(img_w, img_h, monitor_w, monitor_h, 0.60);
-
-    // Solid background #1E1E1E (no alpha)
-    let css_provider = gtk4::CssProvider::new();
-    css_provider.load_from_data("window.quickpeek-window { background-color: #1E1E1E; }");
-    gtk4::style_context_add_provider_for_display(
-        &display,
-        &css_provider,
-        gtk4::STYLE_PROVIDER_PRIORITY_APPLICATION,
-    );
-
-    // Create undecorated window
-    let window = gtk4::Window::new();
-    window.add_css_class("quickpeek-window");
-    window.set_decorated(false);
-    window.set_default_size(target_w, target_h);
-
-    // Picture widget
-    let picture = gtk4::Picture::for_paintable(&texture);
-    picture.set_can_shrink(true);
-    picture.set_size_request(target_w, target_h);
-    window.set_child(Some(&picture));
-
-    // Instrumentation: print MAP_MS on first map
-    let map_start = start_time;
-    window.connect_map(move |_| {
-        let elapsed = map_start.elapsed().as_millis();
-        println!("MAP_MS {}", elapsed);
-    });
-
-    // Main loop setup
-    let main_loop = glib::MainLoop::new(None, false);
-
-    // Close on Escape key
-    let key_controller = gtk4::EventControllerKey::new();
-    let win_for_key = window.clone();
-    key_controller.connect_key_pressed(move |_ctrl, key, _keycode, _state| {
-        if key == gdk::Key::Escape {
-            win_for_key.close();
-            glib::Propagation::Stop
-        } else {
-            glib::Propagation::Proceed
+                let mut ctx_borrow = ctx_clone.borrow_mut();
+                if let Some(ctx) = ctx_borrow.as_mut() {
+                    let ctx_for_close = ctx_clone.clone();
+                    match ctx.wm.show_file(&path, show_start, move || {
+                        println!("WINDOW_CLOSED");
+                        if let Some(c) = ctx_for_close.borrow_mut().as_mut() {
+                            c.wm.mark_closed();
+                        }
+                    }) {
+                        Ok(()) => {
+                            invocation.return_value(Some(&(true, "").to_variant()));
+                        }
+                        Err(err) => {
+                            invocation.return_value(Some(&(false, err.as_str()).to_variant()));
+                        }
+                    }
+                } else {
+                    invocation.return_value(Some(&(false, "daemon not ready").to_variant()));
+                }
+            }
+            "Quit" => {
+                let mut ctx_borrow = ctx_clone.borrow_mut();
+                if let Some(ctx) = ctx_borrow.as_mut() {
+                    ctx.wm.close_window();
+                    println!("DAEMON_QUIT");
+                    ctx.main_loop.quit();
+                }
+                invocation.return_value(None);
+            }
+            _ => {
+                invocation.return_dbus_error(
+                    "org.freedesktop.DBus.Error.UnknownMethod",
+                    "Unknown method",
+                );
+            }
         }
-    });
-    window.add_controller(key_controller);
+    }) {
+        Ok(id) => id,
+        Err(err) => {
+            eprintln!("Error: failed to register D-Bus object: {}", err);
+            std::process::exit(1);
+        }
+    };
 
-    // Exit 0 on window close (Escape or WM close)
-    let loop_for_close = main_loop.clone();
-    window.connect_close_request(move |_| {
-        loop_for_close.quit();
-        glib::Propagation::Proceed
-    });
+    // Acquire bus name
+    let role = match dbus::request_name(&conn) {
+        Ok(r) => r,
+        Err(err) => {
+            eprintln!("Error: D-Bus RequestName failed: {}", err);
+            std::process::exit(1);
+        }
+    };
 
-    window.present();
-    main_loop.run();
+    match role {
+        dbus::Role::Client => {
+            println!("ROLE CLIENT");
+            match dbus::call_show_file(&conn, &abs_path, 2000) {
+                Ok((true, _)) => {
+                    println!("CALL_MS {}", start_time.elapsed().as_millis());
+                    std::process::exit(0);
+                }
+                Ok((false, msg)) => {
+                    eprintln!("Error: {}", msg);
+                    std::process::exit(1);
+                }
+                Err(err) => {
+                    eprintln!("Error: D-Bus call failed: {}", err);
+                    std::process::exit(1);
+                }
+            }
+        }
+        dbus::Role::Daemon => {
+            println!("ROLE DAEMON");
 
-    std::process::exit(0);
-}
+            if let Err(err) = gtk4::init() {
+                eprintln!("Error: failed to initialize GTK4: {}", err);
+                std::process::exit(1);
+            }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+            let wm = window::WindowManager::new();
+            let main_loop = glib::MainLoop::new(None, false);
 
-    #[test]
-    fn test_cli_missing_args() {
-        let args = vec!["quickpeek".to_string()];
-        let res = validate_cli_path(&args);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().contains("missing image path argument"));
-    }
+            let context = DaemonContext {
+                wm,
+                main_loop: main_loop.clone(),
+            };
+            *daemon_ctx.borrow_mut() = Some(context);
 
-    #[test]
-    fn test_cli_too_many_args() {
-        let args = vec![
-            "quickpeek".to_string(),
-            "tests/fixtures/sample.png".to_string(),
-            "extra_arg".to_string(),
-        ];
-        let res = validate_cli_path(&args);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().contains("too many arguments"));
-    }
+            let ctx_for_close = daemon_ctx.clone();
+            let initial_show = daemon_ctx.borrow_mut().as_mut().unwrap().wm.show_file(
+                &abs_path,
+                start_time,
+                move || {
+                    println!("WINDOW_CLOSED");
+                    if let Some(c) = ctx_for_close.borrow_mut().as_mut() {
+                        c.wm.mark_closed();
+                    }
+                },
+            );
 
-    #[test]
-    fn test_cli_nonexistent_file() {
-        let args = vec![
-            "quickpeek".to_string(),
-            "nonexistent_image_file_98765.png".to_string(),
-        ];
-        let res = validate_cli_path(&args);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().contains("file not found"));
-    }
+            if let Err(err) = initial_show {
+                eprintln!("Error: {}", err);
+                std::process::exit(1);
+            }
 
-    #[test]
-    fn test_cli_unsupported_format() {
-        let args = vec![
-            "quickpeek".to_string(),
-            "Cargo.toml".to_string(),
-        ];
-        let res = validate_cli_path(&args);
-        assert!(res.is_err());
-        assert!(res.unwrap_err().contains("unsupported format"));
-    }
-
-    #[test]
-    fn test_cli_valid_sample_png() {
-        let args = vec![
-            "quickpeek".to_string(),
-            "tests/fixtures/sample.png".to_string(),
-        ];
-        let res = validate_cli_path(&args);
-        assert!(res.is_ok());
-        let path = res.unwrap();
-        assert_eq!(path, PathBuf::from("tests/fixtures/sample.png"));
-    }
-
-    #[test]
-    fn test_aspect_fit_4000x3000_downscaled() {
-        // 4000x3000 image on 1920x1080@60% -> 864x648
-        let (w, h) = calculate_aspect_fit(4000, 3000, 1920, 1080, 0.60);
-        assert_eq!((w, h), (864, 648));
-    }
-
-    #[test]
-    fn test_aspect_fit_64x64_never_upscale() {
-        // 64x64 image on 1920x1080 -> stays 64x64 (never upscale)
-        let (w, h) = calculate_aspect_fit(64, 64, 1920, 1080, 0.60);
-        assert_eq!((w, h), (64, 64));
-    }
-
-    #[test]
-    fn test_aspect_fit_500x2000_tall() {
-        // 500x2000 image on 1920x1080@60% -> 162x648
-        let (w, h) = calculate_aspect_fit(500, 2000, 1920, 1080, 0.60);
-        assert_eq!((w, h), (162, 648));
+            main_loop.run();
+            std::process::exit(0);
+        }
     }
 }
